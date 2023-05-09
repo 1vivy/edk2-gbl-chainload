@@ -2051,7 +2051,8 @@ CmdFlash (IN CONST CHAR8 *arg, IN VOID *data, IN UINT32 sz)
   }
 
 out:
-  if (!AsciiStrnCmp (arg, "system", AsciiStrLen ("system")) &&
+  if ((!AsciiStrnCmp (arg, "system", AsciiStrLen ("system"))||
+    !AsciiStrnCmp (arg, "super", AsciiStrLen ("super"))) &&
     !IsEnforcing () &&
     (FlashResult == EFI_SUCCESS)) {
      // reset dm_verity mode to enforcing
