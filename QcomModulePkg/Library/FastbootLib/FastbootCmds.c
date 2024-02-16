@@ -2537,7 +2537,7 @@ VOID InitMultiThreadEnv ()
 
   if ((Status != EFI_SUCCESS) ||
     (KernIntf == NULL) ||
-    KernIntf->Version < EFI_KERNEL_PROTOCOL_VER_UNSAFE_STACK_APIS) {
+    KernIntf->Version < EFI_KERNEL_PROTOCOL_VER_LOCK_API) {
     DEBUG ((EFI_D_VERBOSE, "Multi thread is not supported.\n"));
     return;
   }
@@ -2573,7 +2573,7 @@ STATIC VOID GetBufferSize (UINT64 *MaxBufferSize, UINT64 *MinBufferSize)
     return;
   }
 
-  if (DdrSize <= DDR_128MB) {
+  if (DdrSize <= DDR_512MB) {
     /* 35MB */
     *MaxBufferSize = 36700160;
     /* 16MB */
@@ -2914,7 +2914,6 @@ CmdBoot (CONST CHAR8 *Arg, VOID *Data, UINT32 Size)
   boot_img_hdr_v3 *HdrV3 = Data;
   EFI_STATUS Status = EFI_SUCCESS;
   UINT32 ImageSizeActual = 0;
-  UINT32 PageSize = 0;
   UINT32 SigActual = SIGACTUAL;
   CHAR8 Resp[MAX_RSP_SIZE];
   BOOLEAN MdtpActive = FALSE;
@@ -2986,8 +2985,9 @@ CmdBoot (CONST CHAR8 *Arg, VOID *Data, UINT32 Size)
     FastbootFail ("BootImage is Incomplete");
     goto out;
   }
-  if ((MaxDownLoadSize - (ImageSizeActual - SigActual)) < PageSize) {
-    FastbootFail ("BootImage: Size is greater than boot image buffer can hold");
+
+  if (MaxDownLoadSize < (ImageSizeActual - SigActual)) {
+    FastbootFail ("BootImage: Size is greater than max download size");
     goto out;
   }
 
