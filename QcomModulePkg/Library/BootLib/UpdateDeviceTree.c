@@ -29,7 +29,7 @@
 /*
  * Changes from Qualcomm Innovation Center are provided under the following license:
  *
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted (subject to the limitations in the
@@ -84,7 +84,6 @@
 #define DEFAULT_CELL_SIZE 2
 #define NUM_RNG_SEED_WORDS 512
 #define NUM_RAMDUMP_PROP_ELEM   2
-#define TEMP_INCR 10000
 
 STATIC struct FstabNode FstabTable = {"/firmware/android/fstab", "dev",
                                       "/soc/"};
@@ -1329,89 +1328,6 @@ Out:
   return NumRank;
 }
 
-EFI_STATUS
-UpdateCpuTempCfgs (VOID *fdt, INT32 TripsNodeOffset)
-{
-  INT32 CpuCfgNodeOffset = 0;
-  CONST CHAR8 *name = NULL;
-  INT32 NameLen = 0;
-  CONST UINT32 *TempProp = NULL;
-  INT32 PropLen = 0;
-  UINT32 Temp = 0;
-  EFI_STATUS Ret = 0;
-
-  for (CpuCfgNodeOffset = fdt_first_subnode (fdt, TripsNodeOffset);
-       CpuCfgNodeOffset >= 0;
-       CpuCfgNodeOffset = fdt_next_subnode (fdt, CpuCfgNodeOffset)) {
-    name = fdt_get_name (fdt, CpuCfgNodeOffset, &NameLen);
-    /* only the nodes we need start with cpu, so look for that */
-    if (name &&
-        !AsciiStrnCmp (name, "cpu", MIN(AsciiStrLen("cpu"), NameLen))) {
-      TempProp = fdt_getprop (fdt, CpuCfgNodeOffset, "temperature", &PropLen);
-      if (TempProp) {
-        Temp = fdt32_to_cpu (ReadUnaligned32 (TempProp));
-        /* some pkgs have a higher temp threshold */
-        /* if needed, we can be more specific here based on node name */
-        Temp += TEMP_INCR;
-        FdtPropUpdateFunc (fdt, CpuCfgNodeOffset, "temperature", Temp,
-                           fdt_setprop_u32, Ret);
-        if (Ret) {
-          DEBUG ((EFI_D_ERROR, "failed to update %s; error %d\n", name, Ret));
-        }
-      } else {
-        DEBUG ((EFI_D_ERROR, "can't find temperature node in %s\n", name));
-        Ret = EFI_NOT_FOUND;
-      }
-    }
-  }
-
-  return Ret;
-}
-
-EFI_STATUS
-UpdateThermalNodesThreshs (VOID *fdt)
-{
-  INT32 ThermalZonesOffset = 0;
-  INT32 CpuNodeOffset = 0;
-  INT32 TripsNodeOffset = 0;
-  CONST CHAR8 *name = NULL;
-  INT32 NameLen = 0;
-  INT32 Ret = 0;
-
-  ThermalZonesOffset = FdtPathOffset (fdt, "/soc/thermal-zones");
-  if (ThermalZonesOffset < 0) {
-    DEBUG ((EFI_D_ERROR, "thermal-zones node not found in device tree\n"));
-    return EFI_NOT_FOUND;
-  }
-
-  for (CpuNodeOffset = fdt_first_subnode (fdt, ThermalZonesOffset);
-       CpuNodeOffset >= 0;
-       CpuNodeOffset = fdt_next_subnode (fdt, CpuNodeOffset)) {
-    name = fdt_get_name (fdt, CpuNodeOffset, &NameLen);
-
-    /* cpu nodes are cpu-[cluster]-[index]-[01] */
-    /* we only care that we have a cpu node though */
-    if (name && 
-        !AsciiStrnCmp(name, "cpu-", MIN(AsciiStrLen("cpu-"), NameLen))) {
-      TripsNodeOffset = fdt_subnode_offset_namelen (fdt, CpuNodeOffset,
-                                                    "trips",
-                                                    AsciiStrLen("trips"));
-      if (TripsNodeOffset <= 0) {
-        DEBUG ((EFI_D_ERROR, "trips node not found in %s; skipping...\n",
-                name));
-        continue;
-      }
-      Ret = UpdateCpuTempCfgs (fdt, TripsNodeOffset);
-      if (Ret) {
-        DEBUG ((EFI_D_ERROR, "failed to update %s; error %d\n", (CHAR16 *)name,
-                Ret));
-      }
-    }
-  }
-
-  return EFI_SUCCESS;
-}
-
 /* Top level function that updates the device tree. */
 EFI_STATUS
 UpdateDeviceTree (VOID *fdt,
@@ -1433,8 +1349,6 @@ UpdateDeviceTree (VOID *fdt,
   UINT64 Revision;
   EFI_STATUS Status;
   EFI_RAMPARTITION_PROTOCOL *EfiRamPartProt;
-  EFI_CHIPINFO_PROTOCOL *EfiChipInfoProt = NULL;
-  UINT32 PkgInfo = 0;
   UINT8 NumRank = 0;
   UINT32 Hbb;
   UINT64 UpdateDTStartTime = GetTimerCountms ();
@@ -1460,18 +1374,6 @@ UpdateDeviceTree (VOID *fdt,
   if (ret != 0) {
     DEBUG ((EFI_D_ERROR, "ERROR: Failed to move/resize dtb buffer ...\n"));
     return EFI_BAD_BUFFER_SIZE;
-  }
-
-  Status = gBS->LocateProtocol(&gEfiChipInfoProtocolGuid, NULL,
-                               (VOID **)&EfiChipInfoProt);
-  if (EFI_ERROR (Status))
-    DEBUG ((EFI_D_ERROR, "failed to find chip info protocol\n"));
-  else {
-    Status = EfiChipInfoProt->GetRawPackageType(EfiChipInfoProt, &PkgInfo);
-    if (!EFI_ERROR (Status) &&
-        PkgInfo & 0x1) {
-      ret = UpdateThermalNodesThreshs (fdt);
-    }
   }
 
   /* Get offset of the memory node */
