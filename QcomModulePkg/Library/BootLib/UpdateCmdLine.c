@@ -33,7 +33,7 @@
 /*
   * Changes from Qualcomm Innovation Center are provided under the following
   * license:
-  * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+  * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
   *
   * Redistribution and use in source and binary forms, with or without
   * modification, are permitted (subject to the limitations in the disclaimer
@@ -532,6 +532,18 @@ GetSystemPath (CHAR8 **SysPath, BOOLEAN MultiSlotBoot, BOOLEAN BootIntoRecovery,
                  GetPartitionIdxInLun (PartitionName, Lun));
   } else if (!AsciiStrCmp ("NVME", RootDevStr)) {
     AsciiSPrint (*SysPath, MAX_PATH_SIZE, " %a=/dev/nvme0n1p%d", Key, Index);
+  } else if (!AsciiStrCmp ("VBLK", RootDevStr)) {
+    /* By default, in LVGVM device tree, we reserve the first vblk for
+     * system_a, the second one for userdata and the third one for
+     * system_b, so here we should take "root=/dev/vda" when cureent
+     * slot is '_a' and take "root=/dev/vdc" when current slot is '_b'
+     **/
+    if (StrnCmp ((CONST CHAR16 *)L"_a", CurSlot.Suffix,
+        StrLen (CurSlot.Suffix)) == 0)
+      AsciiSPrint (*SysPath, MAX_PATH_SIZE, " %a=/dev/vda", Key);
+    else if (StrnCmp ((CONST CHAR16 *)L"_b", CurSlot.Suffix,
+          StrLen (CurSlot.Suffix)) == 0)
+      AsciiSPrint (*SysPath, MAX_PATH_SIZE, " %a=/dev/vdc", Key);
   } else {
     DEBUG ((EFI_D_ERROR, "Unknown Device type\n"));
     FreePool (*SysPath);
