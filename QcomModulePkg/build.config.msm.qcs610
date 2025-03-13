@@ -1,5 +1,5 @@
 ################################################################################
-MSM_ARCH=talos
+MSM_ARCH=qcs610
 BOOTLOADER_ARCH=AARCH64
 VERIFIED_BOOT_ENABLED=0
 VERIFIED_BOOT_LE=0
