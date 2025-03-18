@@ -33,7 +33,7 @@
 /*
  *  Changes from Qualcomm Innovation Center are provided under the following license:
  *
- *  Copyright (c) 2022 - 2024 Qualcomm Innovation Center, Inc. All rights
+ *  Copyright (c) 2022 - 2025 Qualcomm Innovation Center, Inc. All rights
  *  reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
@@ -458,6 +458,10 @@ flashless_boot:
   }
 
 fastboot:
+#ifdef AUTO_VIRT_ABL
+  DEBUG ((EFI_D_INFO, "Rebooting the device.\n"));
+  RebootDevice (NORMAL_MODE);
+#endif
   if (FlashlessBoot) {
     DEBUG ((EFI_D_ERROR, "No fastboot support for flashless chipsets,"
                                " Infinte loop\n"));
