@@ -22,6 +22,44 @@
  * SOFTWARE.
  */
 
+
+ /*
+ * Changes from Qualcomm Innovation Center are provided under the following license:
+ *
+ * Copyright (c) 2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ *
+ *  Redistribution and use in source and binary forms, with or without
+ *  modification, are permitted (subject to the limitations in the
+ *  disclaimer below) provided that the following conditions are met:
+ *
+ *      * Redistributions of source code must retain the above copyright
+ *        notice, this list of conditions and the following disclaimer.
+ *
+ *      * Redistributions in binary form must reproduce the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer in the documentation and/or other materials provided
+ *        with the distribution.
+ *
+ *      * Neither the name of Qualcomm Innovation Center, Inc. nor the names of its
+ *        contributors may be used to endorse or promote products derived
+ *        from this software without specific prior written permission.
+ *
+ *  NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ *  GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ *  HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ *   WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ *  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ *  IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ *  ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ *  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ *  GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ *  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ *  IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ *  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ *  IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+
 #include "avb_cmdline.h"
 #include "avb_sha.h"
 #include "avb_util.h"
@@ -42,6 +80,10 @@ char* avb_sub_cmdline(AvbOps* ops,
   const char* replace_str[NUM_GUIDS] = {"$(ANDROID_SYSTEM_PARTUUID)",
                                         "$(ANDROID_BOOT_PARTUUID)",
                                         "$(ANDROID_VBMETA_PARTUUID)"};
+#ifdef AUTO_LVGVM_ABL
+  char* replaceSystemPartuuid = "PARTUUID=$(ANDROID_SYSTEM_PARTUUID)";
+#endif
+
   char* ret = NULL;
   AvbIOResult io_ret;
   size_t n;
@@ -85,8 +127,26 @@ char* avb_sub_cmdline(AvbOps* ops,
       goto fail;
     }
 
+    /*
+     * For LVGVM, system can't find PARTUUID from GUID. Therefore,
+     * use vda/vdc replace the partuuid for dm-verity.
+     *
+     * By default, in LVGVM device tree, we reserve the first vblk for
+     * system_a, the second one for userdata and the third one for
+     * system_b, so here we should take "root=/dev/vda" when cureent
+     * slot is '_a' and take "root=/dev/vdc" when current slot is '_b'.
+     * */
+#if AUTO_LVGVM_ABL
     if (ret == NULL) {
-      ret = avb_replace(cmdline, replace_str[n], guid_buf);
+      if (avb_strncmp ("_a", ab_suffix, avb_strlen (ab_suffix)) == 0) {
+        ret = avb_replace (cmdline, replaceSystemPartuuid, "/dev/vda");
+      } else if (avb_strncmp ("_b", ab_suffix, avb_strlen (ab_suffix)) == 0) {
+        ret = avb_replace (cmdline, replaceSystemPartuuid, "/dev/vdc");
+      }
+#else
+    if (ret == NULL) {
+      ret = avb_replace (cmdline, replace_str[n], guid_buf);
+#endif
     } else {
       char* new_ret = avb_replace(ret, replace_str[n], guid_buf);
       avb_free(ret);
