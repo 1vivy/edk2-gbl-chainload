@@ -2412,13 +2412,13 @@ VOID BootIntoHibernationImage (BootInfo *Info,
          * stage.
          */
         *SetRotAndBootStateAndVBH = TRUE;
-
+#if !HIBERNATION_TZ_ENCRYPTION
         Status = KeyMasterFbeSetSeed ();
         if (Status != EFI_SUCCESS) {
                 printf ("Failed to set seed for fbe : %r\n", Status);
                 goto err;
         }
-
+#endif
         Ret = RestoreSnapshotImage ();
         if (Ret) {
                 printf ("Failed restore_snapshot_image \n");
