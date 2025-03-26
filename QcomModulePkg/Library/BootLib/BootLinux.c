@@ -32,7 +32,7 @@
  /*
  * Changes from Qualcomm Innovation Center are provided under the following license:
  *
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted (subject to the limitations in the
@@ -643,6 +643,12 @@ DTBImgCheckAndAppendDT (BootInfo *Info, BootParamlist *BootParamlistPtr)
   }
   DtboImgInvalid = LoadAndValidateDtboImg (Info, BootParamlistPtr);
   if (!DtboImgInvalid) {
+#ifdef AUTO_VIRT_ABL
+    /* For AUTO GVM，there is no device tree to be appended,
+       so, we reset device here. */
+    DEBUG ((EFI_D_INFO, "Rebooting the device.\n"));
+    RebootDevice (NORMAL_MODE);
+#endif
     // appended device tree
     Dtb = DeviceTreeAppended (ImageBuffer,
                              ImageSize,
