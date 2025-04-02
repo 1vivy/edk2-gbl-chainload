@@ -1486,6 +1486,12 @@ CmdDownload (IN CONST CHAR8 *arg, IN VOID *data, IN UINT32 sz)
    * 8-character string.
    */
 
+  if (AsciiStrLen (NumBytesString) > ASCII_HEX_STRING_MAX_LENGTH ) {
+    DEBUG ((EFI_D_ERROR, "ERROR: Invalid argument size\n"));
+    FastbootFail (" Invalid argument size");
+    return;
+  }
+
   // Parse out number of data bytes to expect
   mNumDataBytes = AsciiStrHexToUint64 (NumBytesString);
   if (mNumDataBytes == 0) {
@@ -2051,7 +2057,8 @@ CmdFlash (IN CONST CHAR8 *arg, IN VOID *data, IN UINT32 sz)
   }
 
 out:
-  if (!AsciiStrnCmp (arg, "system", AsciiStrLen ("system")) &&
+  if ((!AsciiStrnCmp (arg, "system", AsciiStrLen ("system"))||
+    !AsciiStrnCmp (arg, "super", AsciiStrLen ("super"))) &&
     !IsEnforcing () &&
     (FlashResult == EFI_SUCCESS)) {
      // reset dm_verity mode to enforcing
