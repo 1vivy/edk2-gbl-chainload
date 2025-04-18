@@ -29,7 +29,7 @@
 /*
  * Changes from Qualcomm Innovation Center, Inc. are provided
  * under the following license:
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
 
@@ -2113,7 +2113,7 @@ LoadImageAndAuth (BootInfo *Info, BOOLEAN HibernationResume,
   }
 
   Info->HasPvmFw = false;
-  Info->PvmFwRawSize = 0;
+  Info->PvmFwSizeActual = 0;
 
 #ifdef PVMFW_BCC
   /* Check for pvmfw partition */
@@ -2124,7 +2124,7 @@ LoadImageAndAuth (BootInfo *Info, BOOLEAN HibernationResume,
     if (PvmFwHdrSz &&
         ((boot_img_hdr *)(PvmFwHdr))->kernel_size != 0) {
       Info->HasPvmFw = true;
-      Info->PvmFwRawSize = ((boot_img_hdr *)(PvmFwHdr))->kernel_size;
+      Info->PvmFwSizeActual = ((boot_img_hdr *)(PvmFwHdr))->kernel_size;
       DEBUG ((EFI_D_VERBOSE, "Valid pvmfw found\n"));
     } else {
       DEBUG ((EFI_D_ERROR,

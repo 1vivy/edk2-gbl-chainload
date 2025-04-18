@@ -339,10 +339,7 @@ UpdateBootParams (BootParamlist *BootParamlistPtr)
 #ifdef PVMFW_BCC
   if (QueryPvmFwParams (&PvmFwLoadAddr, &PvmFwSizeReserved)) {
     BootParamlistPtr->PvmFwLoadAddr = PvmFwLoadAddr;
-    if (BootParamlistPtr->PvmFwSize > PvmFwSizeReserved) {
-      DEBUG ((EFI_D_ERROR, "Not enough space left to load pvmfw\n"));
-      return EFI_BUFFER_TOO_SMALL;
-    }
+    BootParamlistPtr->PvmFwSizeReserved = PvmFwSizeReserved;
   }
 #endif
 
@@ -999,7 +996,10 @@ RmRegisterPvmFwRegion (BootInfo *Info, BootParamlist *BootParamlistPtr)
   EFI_STATUS  Status;
 
   PvmFwLoadAddr = BootParamlistPtr->PvmFwLoadAddr;
-  PvmFwSize = BootParamlistPtr->PvmFwSize;
+  /* AVB returned buffer size depends on the device lock state.
+   * Partition size for unlocked device and raw image size for locked device.
+   * Always use actual size to save some memory and also allign it to 4KB. */
+  PvmFwSize = LOCAL_ROUND_TO_PAGE (Info->PvmFwSizeActual, ALIGNMENT_MASK_4KB);
 
   Status = gBS->LocateProtocol (&gEfiRmVmProtocolGuid,
                                 NULL,
@@ -1095,6 +1095,7 @@ AppendPvmFwConfig (BootInfo *Info, BootParamlist *BootParamlistPtr) {
   UINT32 EntrySizes[PVMFW_CONFIG_MAX_BLOBS] = {0};
   PvmFwConfigHeader PvmFwCgfHdr = {0};
   size_t  BccArtifactsValidSize = 0;
+  UINT64 PvmFwSizeFinal = 0;
   UINT8 Ret;
 
   //TODO: Ensure there is enough room to append config data.
@@ -1127,8 +1128,18 @@ AppendPvmFwConfig (BootInfo *Info, BootParamlist *BootParamlistPtr) {
   }
 
   CreatePvmFwConfig (&PvmFwCgfHdr, EntrySizes, PVMFW_CONFIG_MAX_BLOBS);
-  PvmFwCfgLoadAddr = (UINT8*)((((BootParamlistPtr->PvmFwLoadAddr +
-                     Info->PvmFwRawSize) / 4096) * 4096) + 4096);
+  PvmFwSizeFinal = LOCAL_ROUND_TO_PAGE (Info->PvmFwSizeActual,
+                                        ALIGNMENT_MASK_4KB) +
+                                        PvmFwCgfHdr.TotalSize;
+  //Ensure pvmfw raw binary + configuration header can fit in golden region.
+  if (PvmFwSizeFinal > BootParamlistPtr->PvmFwSizeReserved) {
+    DEBUG ((EFI_D_ERROR, "Not enough space left to load pvmfw\n"));
+    return EFI_BUFFER_TOO_SMALL;
+  }
+
+  PvmFwCfgLoadAddr = (UINT8*)(BootParamlistPtr->PvmFwLoadAddr +
+                              LOCAL_ROUND_TO_PAGE (Info->PvmFwSizeActual,
+                              ALIGNMENT_MASK_4KB));
 
   DEBUG ((EFI_D_VERBOSE, "PvmFwCfgLoadAddr: 0x%lx\n",
                           PvmFwCfgLoadAddr));
@@ -1160,6 +1171,7 @@ AppendPvmFwConfig (BootInfo *Info, BootParamlist *BootParamlistPtr) {
                            fdt_totalsize (BootParamlistPtr->AvfDpDtboBaseAddr));
   }
 
+  Info->PvmFwSizeActual = PvmFwSizeFinal;
   FreePool (FinalEncodedBccArtifacts);
 
   return EFI_SUCCESS;
@@ -1262,13 +1274,18 @@ LoadAddrAndDTUpdate (BootInfo *Info, BootParamlist *BootParamlistPtr)
    * pvmfw region with RM.
    */
   if (Info->HasPvmFw &&
-      BootParamlistPtr->PvmFwSize >= 0 &&
+      BootParamlistPtr->PvmFwBufferSize >= 0 &&
       PvmFwLoadAddr != 0) {
+    // Ensure pvmfw binary can fit in pvmfw golden region carveout.
+    if (Info->PvmFwSizeActual > BootParamlistPtr->PvmFwSizeReserved) {
+        DEBUG ((EFI_D_ERROR, "Not Enough space left to load pvmfw\n"));
+        return EFI_BUFFER_TOO_SMALL;
+    }
     gBS->CopyMem ((CHAR8 *)PvmFwLoadAddr,
                   BootParamlistPtr->PvmFwBuffer +
                   /* Skip boot image header */
                   BOOT_IMG_MAX_PAGE_SIZE,
-                  BootParamlistPtr->PvmFwSize);
+                  Info->PvmFwSizeActual);
     DEBUG ((EFI_D_VERBOSE, "Copied pvmfw into golden region\n"));
 
     Status = AppendPvmFwConfig (Info, BootParamlistPtr);
@@ -1678,18 +1695,21 @@ BootLinux (BootInfo *Info)
 
   BootParamlistPtr.PvmFwBuffer = NULL;
   if (Info->HasPvmFw) {
+    /* PvmFwBuffer and PvmFwBufferSize are populated by AVB helper functions
+     * For unlocked devices buffer size is partition size and for locked devices
+     * it is image size. */
     Status = GetImage (Info,
                       &BootParamlistPtr.PvmFwBuffer,
-                      (UINTN *)&BootParamlistPtr.PvmFwSize,
+                      (UINTN *)&BootParamlistPtr.PvmFwBufferSize,
                       "pvmfw");
 
     if (Status ||
-        BootParamlistPtr.PvmFwSize <= 0) {
+        BootParamlistPtr.PvmFwBufferSize <= 0) {
         DEBUG ((EFI_D_ERROR, "ERROR: BootLinux: Get pvmfw Image failed!\n"));
         return EFI_LOAD_ERROR;
     } else {
         DEBUG ((EFI_D_VERBOSE, "pvmfw size fetched from partition = 0x%x\n",
-               BootParamlistPtr.PvmFwSize));
+               BootParamlistPtr.PvmFwBufferSize));
     }
 
     // Load DP DTBO if device is unlocked

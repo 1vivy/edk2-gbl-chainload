@@ -29,7 +29,7 @@
  /*
  * Changes from Qualcomm Innovation Center are provided under the following license:
  *
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2023, 2025 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted (subject to the limitations in the
@@ -194,7 +194,7 @@ typedef struct BootInfo {
   UINT32 HeaderVersion;
   BOOLEAN HasBootInitRamdisk;
   BOOLEAN HasPvmFw;
-  UINT32 PvmFwRawSize;
+  UINT32 PvmFwSizeActual;
 } BootInfo;
 
 typedef struct BootLinuxParamlist {
@@ -220,6 +220,8 @@ typedef struct BootLinuxParamlist {
   UINT64 RamdiskLoadAddr;
   UINT64 DeviceTreeLoadAddr;
   UINT64 PvmFwLoadAddr;
+  // Max allowed size of Pvmfw's Golden copy region.
+  UINT64 PvmFwSizeReserved;
   UINT64 *HypDtboBaseAddr;
   UINT32 NumHypDtbos;
   VOID *AvfDpDtboBaseAddr;
@@ -246,7 +248,6 @@ typedef struct BootLinuxParamlist {
   //Kernel size rounded off based on the page size
   UINT32 KernelSizeActual;
   UINT32 FinalBootConfigLen;
-  UINT32 PvmFwSize;
 
   CHAR8 *FinalCmdLine;
   CHAR8 *FinalBootConfig;
@@ -258,7 +259,9 @@ typedef struct BootLinuxParamlist {
    * with init_boot partition
    */
   VOID *RamdiskBuffer;
+  // Filled by AVB helper functions
   VOID *PvmFwBuffer;
+  UINT64 PvmFwBufferSize;
 } BootParamlist;
 
 typedef struct {
