@@ -29,7 +29,7 @@
 /*
  * Changes from Qualcomm Innovation Center are provided under the following license:
  *
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted (subject to the limitations in the
@@ -76,11 +76,7 @@ platform_dt_absolute_match (struct dt_entry *cur_dt_entry,
 STATIC struct dt_entry *
 platform_dt_match_best (struct dt_entry_node *dt_list);
 
-#ifndef AUTO_VIRT_ABL
 STATIC BOOLEAN DtboNeed = TRUE;
-#else
-STATIC BOOLEAN DtboNeed = FALSE;
-#endif
 
 STATIC INT32 DtboIdx = INVALID_PTN;
 INT32 GetDtboIdx (VOID)
