@@ -76,9 +76,15 @@ platform_dt_absolute_match (struct dt_entry *cur_dt_entry,
 STATIC struct dt_entry *
 platform_dt_match_best (struct dt_entry_node *dt_list);
 
+#ifndef AUTO_VIRT_ABL
 STATIC BOOLEAN DtboNeed = TRUE;
-
 STATIC INT32 DtboIdx = INVALID_PTN;
+#else
+STATIC BOOLEAN DtboNeed = FALSE;
+/* Take DtboIdx as 0 for Android VTS test when dtbo is disabled. */
+STATIC INT32 DtboIdx = 0;
+#endif
+
 INT32 GetDtboIdx (VOID)
 {
    return DtboIdx;
