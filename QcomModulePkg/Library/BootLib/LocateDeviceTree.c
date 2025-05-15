@@ -29,7 +29,7 @@
 /*
  * Changes from Qualcomm Innovation Center are provided under the following license:
  *
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted (subject to the limitations in the
@@ -78,11 +78,13 @@ platform_dt_match_best (struct dt_entry_node *dt_list);
 
 #ifndef AUTO_VIRT_ABL
 STATIC BOOLEAN DtboNeed = TRUE;
+STATIC INT32 DtboIdx = INVALID_PTN;
 #else
 STATIC BOOLEAN DtboNeed = FALSE;
+/* Take DtboIdx as 0 for Android VTS test when dtbo is disabled. */
+STATIC INT32 DtboIdx = 0;
 #endif
 
-STATIC INT32 DtboIdx = INVALID_PTN;
 INT32 GetDtboIdx (VOID)
 {
    return DtboIdx;
