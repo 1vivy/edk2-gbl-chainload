@@ -30,7 +30,7 @@
 /*
  * Changes from Qualcomm Innovation Center are provided under the following license:
  *
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted (subject to the limitations in the
@@ -339,9 +339,43 @@ static struct PartialGoodsWithLabel PartialGoodsMmTypeWithLabel[] = {
     {BIT (EFICHIPINFO_PART_CAMERA),
     {"cam_csid_lite1", "status", "no"}},
     {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_csid_lite2", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_csid_lite3", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_csid_lite4", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_csid_lite5", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_csid_lite6", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_csid_lite7", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_csid_lite8", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_csid_lite9", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
     {"cam_vfe_lite0", "status", "no"}},
     {BIT (EFICHIPINFO_PART_CAMERA),
     {"cam_vfe_lite1", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_vfe_lite2", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_vfe_lite3", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_vfe_lite4", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_vfe_lite5", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_vfe_lite6", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_vfe_lite7", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_vfe_lite8", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_vfe_lite9", "status", "no"}},
+    {BIT (EFICHIPINFO_PART_CAMERA),
+    {"cam_lx7", "status", "no"}},
     {BIT (EFICHIPINFO_PART_CAMERA),
     {"cam_ipe0", "status", "no"}},
     {BIT (EFICHIPINFO_PART_CAMERA),
