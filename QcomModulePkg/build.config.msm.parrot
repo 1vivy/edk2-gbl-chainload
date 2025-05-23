@@ -9,7 +9,7 @@ BUILD_USES_RECOVERY_AS_BOOT=0
 DISABLE_PARALLEL_DOWNLOAD_FLASH=0
 QSPA_BOOTCONFIG_ENABLE=1
 PVMFW_ENABLED=1
-
+USE_DUMMY_BCC=1
 ################################################################################
 . ${ROOT_DIR}/${ABL_SRC}/QcomModulePkg/build.config.msm.common
 . ${ROOT_DIR}/${ABL_SRC}/QcomModulePkg/build.config.msm.signature_v2
