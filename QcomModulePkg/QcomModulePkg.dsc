@@ -183,6 +183,9 @@
   !if $(VERIFIED_BOOT_ENABLED)
       GCC:*_*_*_CC_FLAGS = -DVERIFIED_BOOT_ENABLED
   !endif
+  !if $(USE_DUMMY_BCC)
+      GCC:*_*_*_CC_FLAGS = -DUSE_DUMMY_BCC
+  !endif
   !if $(BASE_ADDRESS)
       GCC:*_*_*_CC_FLAGS = -DBASE_ADDRESS=$(BASE_ADDRESS)
   !endif
