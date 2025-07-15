@@ -1772,6 +1772,20 @@ LoadImageAndAuthVB2 (BootInfo *Info, BOOLEAN HibernationResume,
     }
   }
 #endif
+#ifdef ENABLE_LE_VARIANT // Only in case where AVB is enabled on LE Build.
+  if (!IsRootCmdLineUpdated (Info)) {
+    CHAR8 *SystemPath = NULL;
+    UINT32 SystemPathLen = 0;
+    SystemPathLen = GetSystemPath (&SystemPath, Info->MultiSlotBoot,
+                                   Info->BootIntoRecovery, (CHAR16 *)L"system",
+                                   (CHAR8 *)"root", Info->FlashlessBoot);
+    if (SystemPathLen == 0 ||
+        SystemPath == NULL) {
+      return EFI_LOAD_ERROR;
+    }
+    GUARD (AppendVBCmdLine (Info, SystemPath));
+  }
+#endif
 out:
   if (Status != EFI_SUCCESS) {
     if (SlotData != NULL) {
