@@ -1069,10 +1069,13 @@ SetFWMilestone (VOID) {
                                 (VOID**)&RmVmProtocol);
   if (Status != EFI_SUCCESS)  {
     DEBUG ((EFI_D_ERROR, "RmVmProtocol not found: %r\n", Status));
-    return Status;
+    /* RM protocol is not available, allow device start */
+    return EFI_SUCCESS;
   }
   Status = RmVmProtocol->SetFwMilestone (RmVmProtocol);
-  if (Status != EFI_SUCCESS) {
+  /* Allow device start if SetFwMilestone is not implemented */
+  if ((Status != EFI_SUCCESS) &&
+         (Status != 0xFFFFFFFF)) {
     DEBUG ((EFI_D_ERROR, "SetFwMilestone failed Status: %r\n", Status));
     return Status;
   }
