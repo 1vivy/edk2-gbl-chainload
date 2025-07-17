@@ -1056,8 +1056,26 @@ RmRegisterPvmFwRegion (BootInfo *Info, BootParamlist *BootParamlistPtr)
     return Status;
   }
 
+  return EFI_SUCCESS;
+}
+
+STATIC EFI_STATUS
+SetFWMilestone (VOID) {
+  RmVmProtocol *RmVmProtocol = NULL;
+  EFI_STATUS  Status;
+
+  Status = gBS->LocateProtocol (&gEfiRmVmProtocolGuid,
+                                NULL,
+                                (VOID**)&RmVmProtocol);
+  if (Status != EFI_SUCCESS)  {
+    DEBUG ((EFI_D_ERROR, "RmVmProtocol not found: %r\n", Status));
+    /* RM protocol is not available, allow device start */
+    return EFI_SUCCESS;
+  }
   Status = RmVmProtocol->SetFwMilestone (RmVmProtocol);
-  if (Status != EFI_SUCCESS) {
+  /* Allow device start if SetFwMilestone is not implemented */
+  if ((Status != EFI_SUCCESS) &&
+         (Status != 0xFFFFFFFF)) {
     DEBUG ((EFI_D_ERROR, "SetFwMilestone failed Status: %r\n", Status));
     return Status;
   }
@@ -1298,6 +1316,11 @@ LoadAddrAndDTUpdate (BootInfo *Info, BootParamlist *BootParamlistPtr)
     } else {
       DEBUG ((EFI_D_ERROR, "Failed to write pvmfw config: %r\n", Status));
     }
+  }
+  Status = SetFWMilestone ();
+  if (Status != EFI_SUCCESS) {
+    DEBUG ((EFI_D_ERROR, "Failed to set FWMilestone: %r\n", Status));
+    return Status;
   }
 #endif
 
