@@ -74,8 +74,8 @@ typedef struct FreeRanges {
 
 #if HIBERNATION_SUPPORT_AES
 #if HIBERNATION_TZ_ENCRYPTION
-#define NUM_CORES 2
-#define NUM_SILVER_CORES 1
+#define NUM_CORES 4
+#define NUM_SILVER_CORES 2
 #else
 #define NUM_CORES 8
 #define NUM_SILVER_CORES 4
