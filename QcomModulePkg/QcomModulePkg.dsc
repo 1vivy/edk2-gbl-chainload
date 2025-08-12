@@ -28,9 +28,9 @@
 #*/
 
 #/*
-# * Changes from Qualcomm Innovation Center, Inc. are provided under the following license:
+# * Changes from Qualcomm Technologies, Inc. are provided under the following license:
 # *
-# * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+# * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # * SPDX-License-Identifier: BSD-3-Clause-Clear
 #*/
 
@@ -131,6 +131,10 @@
   !if $(HIBERNATION_SUPPORT_AES)
       GCC:*_*_*_CC_FLAGS = -DHIBERNATION_SUPPORT_AES
       GCC:*_*_*_PP_FLAGS = -DHIBERNATION_SUPPORT_AES
+  !endif
+  !if $(HIBERNATION_TZ_ENCRYPTION)
+      GCC:*_*_*_CC_FLAGS = -DHIBERNATION_TZ_ENCRYPTION
+      GCC:*_*_*_PP_FLAGS = -DHIBERNATION_TZ_ENCRYPTION
   !endif
   !if $(HIBERNATION_SWAP_PARTITION_NAME)
       GCC:*_*_*_CC_FLAGS = -DHIBERNATION_SWAP_PARTITION_NAME='L"$(HIBERNATION_SWAP_PARTITION_NAME)"'
