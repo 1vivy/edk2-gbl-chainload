@@ -9,6 +9,12 @@
 #
 #**/
 
+#/*
+#  Changes from Qualcomm Technologies, Inc. are provided under the following license:
+#  Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+#  SPDX-License-Identifier: BSD-3-Clause-Clear
+#**/
+
 [Defines]
   INF_VERSION                    = 0x00010005
   BASE_NAME                      = CompilerIntrinsicsLib
@@ -78,6 +84,9 @@
   Arm/uldiv.asm        | MSFT
   Arm/ldivmod.asm      | MSFT
   Arm/llsr.asm         | MSFT
+
+[Sources.AARCH64]
+  AArch64/ashlti3.S    | GCC
 
 [Packages]
   MdePkg/MdePkg.dec

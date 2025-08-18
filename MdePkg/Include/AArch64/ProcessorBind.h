@@ -9,6 +9,12 @@
 
 **/
 
+/*
+ * Changes from Qualcomm Technologies, Inc. are provided under the following license:
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * SPDX-License-Identifier: BSD-3-Clause-Clear
+ */
+
 #ifndef __PROCESSOR_BIND_H__
 #define __PROCESSOR_BIND_H__
 
@@ -186,6 +192,11 @@ typedef INT64   INTN;
   #define GCC_ASM_IMPORT(func__)  \
          .extern  _CONCATENATE (__USER_LABEL_PREFIX__, func__)
 
+#endif
+
+#ifndef AARCH64_BTI
+#define AARCH64_BTI_NOTE()
+#define AARCH64_BTI(__type)
 #endif
 
 /**
