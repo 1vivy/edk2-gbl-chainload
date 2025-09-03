@@ -29,7 +29,7 @@
  /*
  * Changes from Qualcomm Innovation Center are provided under the following license:
  *
- * Copyright (c) 2022, 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022, 2024, 2025 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted (subject to the limitations in the
@@ -122,6 +122,7 @@ typedef enum {
   EFI_PLATFORMINFO_TYPE_X100 = 0x27, /**< Target is A PCIe card   */
   EFI_PLATFORMINFO_TYPE_CRD  = 0x28,   /**< CRD device   */
   EFI_PLATFORMINFO_TYPE_QQVP = 0x29,   /**< Qualcomm QEMU Virtual Platform  */
+  EFI_PLATFORMINFO_TYPE_QAR = 0x2C,   /**< QAR Device  */
 
   EFI_PLATFORMINFO_NUM_TYPES, /**< Number of known targets
                                                  (including unknown). @newpage

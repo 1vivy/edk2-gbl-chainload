@@ -25,40 +25,11 @@
  * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
- * Changes from Qualcomm Innovation Center are provided under the following license:
+ * Changes from Qualcomm Technologies, Inc. are provided under the
+ * following license:
  *
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted (subject to the limitations in the
- * disclaimer below) provided that the following conditions are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *
- *     * Redistributions in binary form must reproduce the above
- *       copyright notice, this list of conditions and the following
- *       disclaimer in the documentation and/or other materials provided
- *       with the distribution.
- *
- *     * Neither the name of Qualcomm Innovation Center, Inc. nor the names of
- *       its contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
- * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
- * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
- * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
- * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
- * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * SPDX-License-Identifier: BSD-3-Clause-Clear
 */
 #if HIBERNATION_SUPPORT_NO_AES
 
@@ -78,6 +49,9 @@
 #include <Library/aes/aes_public.h>
 #include <Library/lz4/lib/lz4.h>
 #include <Protocol/EFIQseecom.h>
+#include "SmciInvokeUtils.h"
+#include "SmciLowPowerKeyMgr.h"
+#include <Protocol/EFIScm.h>
 #endif
 #include "KeymasterClient.h"
 
@@ -99,8 +73,13 @@ typedef struct FreeRanges {
 }FreeRanges;
 
 #if HIBERNATION_SUPPORT_AES
+#if HIBERNATION_TZ_ENCRYPTION
+#define NUM_CORES 4
+#define NUM_SILVER_CORES 2
+#else
 #define NUM_CORES 8
 #define NUM_SILVER_CORES 4
+#endif
 #define NUM_PAGES_PER_GOLD_CORE ((NrCopyPages / 54) * 9)
 #define NUM_PAGES_PER_SILVER_CORE ((NrCopyPages / 54) * 4)
 
@@ -115,6 +94,11 @@ static UINT8 UnwrappedKey[32];
 #define QSEECOM_ALIGN_MASK      (QSEECOM_ALIGN_SIZE - 1)
 #define QSEECOM_ALIGN(x)        \
         ((x + QSEECOM_ALIGN_MASK) & (~QSEECOM_ALIGN_MASK))
+
+#if HIBERNATION_TZ_ENCRYPTION
+Object ClientEnvObj = Object_NULL;
+Object AppClientObj = Object_NULL;
+#endif
 #else
 #define NUM_CORES 1
 #define NUM_SILVER_CORES 0
@@ -267,6 +251,39 @@ static INT32 CheckFreeRanges (UINT64 TargetAddr)
                         return 1;
                 Iter++;
         }
+        return 0;
+}
+
+static INT32 EnableAllCores ()
+{
+        INT32 Iter = 0;
+        UINT32 NumCpus;
+        UINT32 Status;
+
+        DEBUG ((EFI_D_VERBOSE, "Getting count of Max CPUs\n"));
+        NumCpus = KernIntf->MpCpu->MpcoreGetMaxCpuCount ();
+        DEBUG ((EFI_D_VERBOSE, "Available Cores for hibernation: %d\n",
+                NumCpus));
+
+        while (Iter < NumCpus) {
+                DEBUG ((EFI_D_VERBOSE, "Getting Status of core: %d\n", Iter));
+                Status = KernIntf->MpCpu->MpcoreIsCpuActive (Iter);
+                DEBUG ((EFI_D_VERBOSE, "Core: %d, Status: %d\n", Iter, Status));
+                if (!Status) {
+                        DEBUG ((EFI_D_VERBOSE, "Enabling Core: %d\n", Iter));
+                        KernIntf->MpCpu->MpcoreInitDeferredCores (1 << Iter);
+                        KernIntf->Thread->ThreadSleep (10);
+                }
+                Iter++;
+        }
+
+        Iter = 0;
+        while (Iter < NumCpus) {
+                Status = KernIntf->MpCpu->MpcoreIsCpuActive (Iter);
+                DEBUG ((EFI_D_VERBOSE, "Core: %d, Status: %d\n", Iter, Status));
+                Iter++;
+        }
+
         return 0;
 }
 
@@ -1635,6 +1652,81 @@ static UINT64 CopyPageTables ()
 }
 
 #if HIBERNATION_SUPPORT_AES
+#if HIBERNATION_TZ_ENCRYPTION
+static INT32 SetupSMCI (VOID)
+{
+        EFI_STATUS Status = EFI_SUCCESS;
+        QCOM_SCM_PROTOCOL *pQcomScmProtocol = NULL;
+        INT32 Ret = 0;
+
+        Status = gBS->LocateProtocol (&gQcomScmProtocolGuid, NULL,
+                                        (VOID **)&pQcomScmProtocol);
+        if (Status != EFI_SUCCESS ||
+            (pQcomScmProtocol == NULL)) {
+                DEBUG ((EFI_D_ERROR,
+                        "Locate SCM Protocol failed, Status: (0x%x)\n",
+                        Status));
+                Status = ERROR_SECURITY_STATE;
+                    return Status;
+        }
+
+        Status = pQcomScmProtocol->ScmGetClientEnv (pQcomScmProtocol,
+                                                    &ClientEnvObj);
+        if (Object_isERROR (Status) ||
+            Object_isNull (ClientEnvObj)) {
+                DEBUG ((EFI_D_ERROR,
+                        "Failed to get Client Env, Status: (0x%x)\n",
+                        Status));
+        }
+
+        Status = IClientEnvOpen (ClientEnvObj, CLOWPOWERKEYMANAGER_UID,
+                                 &AppClientObj);
+        if (Object_isERROR (Status) ||
+            Object_isNull (AppClientObj)) {
+                DEBUG ((EFI_D_ERROR,
+                        "Failed to get App Client, Status: (0x%x)\n",
+                        Status));
+        }
+
+        return Ret;
+}
+
+static VOID SMCICleanup (VOID)
+{
+        Object_ASSIGN_NULL (AppClientObj);
+        Object_ASSIGN_NULL (ClientEnvObj);
+}
+
+INT32 KeyMgrGetKey (UINT32 Event, VOID *Key, size_t KeyLen,
+                    size_t *KeyLenOut)
+{
+        INT32 Ret = SetupSMCI ();
+
+        if (Ret) {
+                goto exit;
+        }
+
+        Ret = ILowPowerKeyManagerGetKey (AppClientObj, Event, Key,
+                        KeyLen, KeyLenOut);
+exit:
+        SMCICleanup ();
+        return Ret;
+}
+
+static INT32 InitTzAndGetKey ()
+{
+        INT32 Ret;
+        size_t KeyLenOut;
+        Ret = KeyMgrGetKey (ILOWPOWERKEYMANAGER_HIBERNATE_WITH_ENCRYPTION,
+                        UnwrappedKey,
+                        AES256_KEY_SIZE,
+                        &KeyLenOut);
+
+        gBS->CopyMem ((VOID *)(IvGlb), (VOID *)(Dp->Iv), sizeof (Dp->Iv));
+        Ret = 0;
+        return Ret;
+}
+#else
 static INT32 InitTaAndGetKey (struct Secs2dTaHandle *TaHandle)
 {
         INT32 Status;
@@ -1692,11 +1784,13 @@ static INT32 InitTaAndGetKey (struct Secs2dTaHandle *TaHandle)
 
         return 0;
 }
-
+#endif
 static INT32 InitAesDecrypt (VOID)
 {
         INT32 AuthslotCount;
+#if !HIBERNATION_TZ_ENCRYPTION
         Secs2dTaHandle TaHandle = {0};
+#endif
         UINT32 NrSwapMapPages, i;
         Authslot = AllocatePages (1);
 
@@ -1744,10 +1838,15 @@ static INT32 InitAesDecrypt (VOID)
                         return -1;
                 }
         }
+#if HIBERNATION_TZ_ENCRYPTION
+        if (InitTzAndGetKey ()) {
+                return -1;
+        }
+#else
         if (InitTaAndGetKey (&TaHandle)) {
                 return -1;
         }
-
+#endif
         printf ("Hibernation: AES init done\n");
         return 0;
 }
@@ -1867,6 +1966,11 @@ static INT32 RestoreSnapshotImage (VOID)
         UINT32 SMPage = 0; UINT64 DstPfn_z;
 #endif
         InitReadMultiThreadEnv ();
+        Ret = EnableAllCores ();
+        if (Ret < 0) {
+            DEBUG ((EFI_D_ERROR, "EnableAllCores failed\n"));
+            return Ret;
+        }
         StartMs = GetTimerCountms ();
         Ret = ReadSwapInfoStruct ();
         if (Ret < 0) {
@@ -2346,13 +2450,13 @@ VOID BootIntoHibernationImage (BootInfo *Info,
          * stage.
          */
         *SetRotAndBootStateAndVBH = TRUE;
-
+#if !HIBERNATION_TZ_ENCRYPTION
         Status = KeyMasterFbeSetSeed ();
         if (Status != EFI_SUCCESS) {
                 printf ("Failed to set seed for fbe : %r\n", Status);
                 goto err;
         }
-
+#endif
         Ret = RestoreSnapshotImage ();
         if (Ret) {
                 printf ("Failed restore_snapshot_image \n");
