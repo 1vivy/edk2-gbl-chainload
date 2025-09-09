@@ -54,6 +54,12 @@
  * copied and put under another distribution licence
  * [including the GNU Public Licence.] */
 
+/*
+ * Changes from Qualcomm Technologies, Inc. are provided under the following license:
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * SPDX-License-Identifier: BSD-3-Clause-Clear
+ */
+
 #ifndef OPENSSL_HEADER_MEM_H
 #define OPENSSL_HEADER_MEM_H
 
@@ -79,12 +85,18 @@ extern "C" {
 // the case of a malloc failure, prior to returning NULL |OPENSSL_malloc| will
 // push |ERR_R_MALLOC_FAILURE| onto the openssl error stack.
 OPENSSL_EXPORT void *OPENSSL_malloc(size_t size);
+#ifdef FASTBOOT_SSL_COMPAT
+OPENSSL_EXPORT void *OPENSSL_malloc2(size_t size);
+#endif
 #endif // !_BORINGSSL_PROHIBIT_OPENSSL_MALLOC
 
 // OPENSSL_free does nothing if |ptr| is NULL. Otherwise it zeros out the
 // memory allocated at |ptr| and frees it along with the private data.
 // It must only be used on on |ptr| values obtained from |OPENSSL_malloc|
 OPENSSL_EXPORT void OPENSSL_free(void *ptr);
+#ifdef FASTBOOT_SSL_COMPAT
+OPENSSL_EXPORT void OPENSSL_free2(void *ptr);
+#endif
 
 #ifndef _BORINGSSL_PROHIBIT_OPENSSL_MALLOC
 // OPENSSL_realloc returns a pointer to a buffer of |new_size| bytes that
@@ -92,6 +104,9 @@ OPENSSL_EXPORT void OPENSSL_free(void *ptr);
 // allocated and the data at |ptr| is always wiped and freed. Memory is
 // allocated with |OPENSSL_malloc| and must be freed with |OPENSSL_free|.
 OPENSSL_EXPORT void *OPENSSL_realloc(void *ptr, size_t new_size);
+#ifdef FASTBOOT_SSL_COMPAT
+OPENSSL_EXPORT void *OPENSSL_realloc2(void *ptr, size_t new_size);
+#endif
 #endif // !_BORINGSSL_PROHIBIT_OPENSSL_MALLOC
 
 // OPENSSL_cleanse zeros out |len| bytes of memory at |ptr|. This is similar to

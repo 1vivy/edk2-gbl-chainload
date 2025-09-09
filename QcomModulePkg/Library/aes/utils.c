@@ -27,6 +27,12 @@ OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
 IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 **********************************************************************/
 
+/*
+ * Changes from Qualcomm Technologies, Inc. are provided under the following license:
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * SPDX-License-Identifier: BSD-3-Clause-Clear
+ */
+
 #include "utils.h"
 #include <Library/MemoryAllocationLib.h>
 
@@ -78,7 +84,7 @@ void* ENV_sec_memzero(void *ptr, size_t size)
   return _memzero(ptr, size);
 }
 
-int CRYPTO_memcmp(const void *ptr1, const void *ptr2, size_t size)
+int AES_CRYPTO_memcmp(const void *ptr1, const void *ptr2, size_t size)
 {
   return _memcmp(ptr1, ptr2, size);
 }

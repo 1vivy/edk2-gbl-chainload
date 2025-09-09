@@ -120,14 +120,22 @@
  * Sheueling Chang Shantz and Douglas Stebila of Sun Microsystems
  * Laboratories. */
 
+/*
+ * Changes from Qualcomm Technologies, Inc. are provided under the following license:
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * SPDX-License-Identifier: BSD-3-Clause-Clear
+ */
+
 #ifndef OPENSSL_HEADER_BN_H
 #define OPENSSL_HEADER_BN_H
 
 #include <openssl/base.h>
 #include <openssl/thread.h>
 
+#ifndef FASTBOOT_SSL_COMPAT
 #include <inttypes.h>  // for PRIu64 and friends
 #include <stdio.h>  // for FILE*
+#endif
 
 #if defined(__cplusplus)
 extern "C" {
