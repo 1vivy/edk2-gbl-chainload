@@ -83,6 +83,50 @@
   FastbootMain.c
   UsbDescriptors.c
   FastbootCmds.c
+  FastbootSSL/src/FastbootSslCryptoMem.c
+  FastbootSSL/src/FastbootSslBase64.c
+  FastbootSSL/src/FastbootSslDigest.c
+  FastbootSSL/src/FastbootSslDeriveKey.c
+  FastbootSSL/src/FastbootSslCipher.c
+  FastbootSSL/src/FastbootSslCryptoExData.c
+  FastbootSSL/src/FastbootSslRefcount_lock.c
+  FastbootSSL/src/FastbootSslStack.c
+  FastbootSSL/src/FastbootSslBio.c
+  FastbootSSL/src/FastbootSslBuf.c
+  FastbootSSL/src/FastbootSslEvp.c
+  FastbootSSL/src/FastbootSslCbs.c
+  FastbootSSL/src/FastbootSslCbb.c
+  FastbootSSL/src/FastbootSslPem.c
+  FastbootSSL/src/FastbootSslEngine.c
+  FastbootSSL/src/FastbootSslBn.c
+  FastbootSSL/src/FastbootSslBnAdd.c
+  FastbootSSL/src/FastbootSslBnGcd.c
+  FastbootSSL/src/FastbootSslBnGcdExtra.c
+  FastbootSSL/src/FastbootSslBnJacobi.c
+  FastbootSSL/src/FastbootSslBnMontgomery.c
+  FastbootSSL/src/FastbootSslBnMontgomeryInv.c
+  FastbootSSL/src/FastbootSslBnRandom.c
+  FastbootSSL/src/FastbootSslBnShift.c
+  FastbootSSL/src/FastbootSslBnBytes.c
+  FastbootSSL/src/FastbootSslBnCmp.c
+  FastbootSSL/src/FastbootSslBnCtx.c
+  FastbootSSL/src/FastbootSslBnGeneric.c
+  FastbootSSL/src/FastbootSslBnConvert.c
+  FastbootSSL/src/FastbootSslBnMul.c
+  FastbootSSL/src/FastbootSslBnDiv.c
+  FastbootSSL/src/FastbootSslBnDivExtra.c
+  FastbootSSL/src/FastbootSslBnExponentiation.c
+  FastbootSSL/src/FastbootSslBnAsn1.c
+  FastbootSSL/src/FastbootSslRsa.c
+  FastbootSSL/src/FastbootSslRsaBlinding.c
+  FastbootSSL/src/FastbootSslPRsa.c
+  FastbootSSL/src/FastbootSslRsaImpl.c
+  FastbootSSL/src/FastbootSslRsaPadding.c
+  FastbootSSL/src/FastbootSslPkeyRsaAsn1.c
+  FastbootSSL/src/FastbootSslRsaAsn1.c
+  FastbootSSL/src/FastbootSslMd5.c
+  FastbootSSL/src/FastbootSslErr.c
+  ../OpenDice/boringssl/src/crypto/thread_none.c
 
 [BuildOptions]
   GCC:*_*_*_CC_FLAGS = $(UBSAN_UEFI_GCC_FLAG_UNDEFINED)
@@ -103,6 +147,7 @@
   StackCanary
   DebugLib
   UbsanLib
+  CompilerIntrinsicsLib
 
 [Protocols]
   gEfiSimpleTextInProtocolGuid

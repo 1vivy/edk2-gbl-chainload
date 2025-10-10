@@ -54,12 +54,20 @@
  * copied and put under another distribution licence
  * [including the GNU Public Licence.] */
 
+/*
+ * Changes from Qualcomm Technologies, Inc. are provided under the following license:
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * SPDX-License-Identifier: BSD-3-Clause-Clear
+ */
+
 #ifndef OPENSSL_HEADER_BIO_H
 #define OPENSSL_HEADER_BIO_H
 
 #include <openssl/base.h>
 
+#ifndef FASTBOOT_SSL_COMPAT
 #include <stdio.h>  // For FILE
+#endif
 
 #include <openssl/buffer.h>
 #include <openssl/err.h>  // for ERR_print_errors_fp

@@ -51,10 +51,11 @@
  * Hudson (tjh@cryptsoft.com). */
 
 /*
- * Changes from Qualcomm Innovation Center are provided under the following license:
- * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Changes from Qualcomm Technologies, Inc. are provided under the following license:
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
+
 
 #ifndef OPENSSL_HEADER_BASE_H
 #define OPENSSL_HEADER_BASE_H
@@ -146,6 +147,7 @@ extern "C" {
 // TODO(b/169780122): Remove this workaround once Trusty no longer defines it.
 #if defined(__linux__) && !defined(__TRUSTY__)
 #define OPENSSL_LINUX
+#define OPENSSL_NO_THREADS_CORRUPT_MEMORY_AND_LEAK_SECRETS_IF_THREADED
 #endif
 
 #if defined(__Fuchsia__)

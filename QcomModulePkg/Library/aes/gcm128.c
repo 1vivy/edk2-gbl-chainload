@@ -8,6 +8,12 @@
 * in the file LICENSE in the source distribution or at
 * https://www.openssl.org/source/license.html */
 
+/*
+ * Changes from Qualcomm Technologies, Inc. are provided under the following license:
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * SPDX-License-Identifier: BSD-3-Clause-Clear
+ */
+
 #include "modes_lcl.h"
 #include "utils.h"
 
@@ -1736,7 +1742,7 @@ int CRYPTO_gcm128_finish(GCM128_CONTEXT *ctx, const unsigned char *tag,
     ctx->Xi.u[1] ^= ctx->EK0.u[1];
 
     if (tag && len <= sizeof(ctx->Xi))
-        return CRYPTO_memcmp(ctx->Xi.c, tag, len);
+        return AES_CRYPTO_memcmp(ctx->Xi.c, tag, len);
     else
         return -1;
 }
