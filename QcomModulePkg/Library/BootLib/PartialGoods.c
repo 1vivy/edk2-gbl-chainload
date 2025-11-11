@@ -728,13 +728,6 @@ FindLabelAndUpdateProperty (VOID *fdt,
   CONST CHAR8 *Label, *LabelNodePath;
   INT32 SymbolsOffset = 0, NodeOffset = 0;
 
-  SymbolsOffset = FdtPathOffset (fdt, SymbolsDtNode);
-  if (SymbolsOffset < 0) {
-    DEBUG ((EFI_D_ERROR, "Failed to get Symbols node: %a\terror: %d\n",
-            SymbolsDtNode, SymbolsOffset));
-    return;
-  }
-
   for (i = 0; i < TableSz; i++, Table++) {
     if (!(Value & Table->Val)) {
       continue;
@@ -749,6 +742,12 @@ FindLabelAndUpdateProperty (VOID *fdt,
 
     LabelHandle = &(Table->LabelRef);
     Label = LabelHandle->LabelName;
+    SymbolsOffset = FdtPathOffset (fdt, SymbolsDtNode);
+    if (SymbolsOffset < 0) {
+      DEBUG ((EFI_D_ERROR, "Failed to get Symbols node: %a\terror: %d\n",
+              SymbolsDtNode, SymbolsOffset));
+      continue;
+    }
 
     LabelNodePath = fdt_getprop (fdt, SymbolsOffset, Label,
                                   &PropLen);
