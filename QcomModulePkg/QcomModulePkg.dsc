@@ -286,4 +286,5 @@
 			AesLib|QcomModulePkg/Library/aes/AesLib.inf
 			UbsanLib|QcomModulePkg/Library/UbsanLib/UbsanLib.inf
 			Lz4Lib|QcomModulePkg/Library/lz4/lib/Lz4Lib.inf
+            LoadFVLib|QcomModulePkg/Library/LoadFVLib/LoadFVLib.inf
 	}

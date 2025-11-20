@@ -1,0 +1,24 @@
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = LoadFVHelper
+  FILE_GUID                      = acc7b526-4970-41d0-acd0-dd7244f9ad0e
+  MODULE_TYPE                    = BASE
+  VERSION_STRING                 = 1.0
+  LIBRARY_CLASS                  = LoadFVLib
+
+[Sources]
+  LoadFVLib.c
+
+[Protocols]
+	gEfiFirmwareVolume2ProtocolGuid
+  gEfiGraphicsOutputProtocolGuid
+
+[Packages]
+  MdePkg/MdePkg.dec
+	QcomModulePkg/QcomModulePkg.dec
+
+[LibraryClasses]
+  PcdLib
+  PrintLib
+  BaseLib
+  DebugLib

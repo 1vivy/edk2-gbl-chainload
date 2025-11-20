@@ -83,6 +83,7 @@
 #include <Library/HypervisorMvCalls.h>
 #include <Library/UpdateCmdLine.h>
 #include <Protocol/EFICardInfo.h>
+#include <Library/LoadFVLib.h>
 
 #define MAX_APP_STR_LEN 64
 #define MAX_NUM_FS 10
@@ -284,6 +285,9 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   StackGuardChkSetup ();
 
   BootStatsSetTimeStamp (BS_BL_START);
+
+  /* Load Drivers from current FV */
+  LoadDriversFromCurrentFv(ImageHandle);
 
   /* Check if memory card is present; goto flashless if not */
   Status = gBS->LocateProtocol (&gEfiMemCardInfoProtocolGuid, NULL,

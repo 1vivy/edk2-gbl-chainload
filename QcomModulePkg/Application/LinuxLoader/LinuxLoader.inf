@@ -103,6 +103,7 @@
 	FastbootLib
 	UbsanLib
 	Lz4Lib
+	LoadFVLib
 
 [LibraryClasses.AARCH64]
 	AesLib
