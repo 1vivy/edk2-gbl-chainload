@@ -286,9 +286,6 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
 
   BootStatsSetTimeStamp (BS_BL_START);
 
-  /* Load Drivers from current FV */
-  LoadDriversFromCurrentFv(ImageHandle);
-
   /* Check if memory card is present; goto flashless if not */
   Status = gBS->LocateProtocol (&gEfiMemCardInfoProtocolGuid, NULL,
                                   (VOID **)&CardInfo);
@@ -462,6 +459,9 @@ flashless_boot:
   }
 
 fastboot:
+  /* Load Drivers from current FV */
+  LoadDriversFromCurrentFv(ImageHandle);
+
 #ifdef AUTO_VIRT_ABL
   DEBUG ((EFI_D_INFO, "Rebooting the device.\n"));
   RebootDevice (NORMAL_MODE);
