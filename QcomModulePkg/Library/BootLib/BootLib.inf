@@ -111,6 +111,7 @@
         Bootconfig.c
 	EarlyEthernet.c
 	EarlyUsbInit.c
+	BootESP.c
 
 [Packages]
 	ArmPkg/ArmPkg.dec
@@ -148,6 +149,9 @@
 	gEfiFileInfoGuid
 	gEfiSdRemovableGuid
 	gEfiFileSystemInfoGuid
+	gEfiEventExitBootServicesGuid
+	gEfiEventReadyToBootGuid
+	gEfiEndOfDxeEventGroupGuid
 	gEfiPartitionTypeGuid
 	gEfiEmmcRpmbPartitionGuid
 	gEfiEmmcGppPartition1Guid

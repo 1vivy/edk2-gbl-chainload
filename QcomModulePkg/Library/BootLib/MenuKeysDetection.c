@@ -79,6 +79,7 @@
 #include <Library/BootLinux.h>
 #include <Library/VerifiedBootMenu.h>
 #include <Library/Board.h>
+#include <Library/BootESP.h>
 #include <Uefi.h>
 
 #include <Protocol/EFIVerifiedBoot.h>
@@ -201,6 +202,11 @@ UpdateDeviceStatus (OPTION_MENU_INFO *MsgInfo, INTN Reason)
     Status = HandleActiveSlotUnbootable (TRUE);
     DEBUG ((EFI_D_WARN,
           "Reset unbootable slots failed enter fastboot mode\n"));
+    break;
+  case ESP:
+    Status = BootESP();
+    DEBUG ((EFI_D_WARN,
+          "Boot to ESP failed, please check the ESP partition existence\n"));
     break;
   }
 }

@@ -88,6 +88,13 @@ STATIC MENU_MSG_INFO mFastbootOptionTitle[] = {
      OPTION_ITEM,
      0,
      RESTART},
+    {{"Boot to ESP"},
+     BIG_FACTOR,
+     BGR_CYAN,
+     BGR_BLACK,
+     OPTION_ITEM,
+     0,
+     ESP},
     {{"Restart bootloader"},
      BIG_FACTOR,
      BGR_RED,
@@ -357,77 +364,80 @@ FastbootMenuShowScreen (OPTION_MENU_INFO *OptionMenuInfo)
     return Status;
 
   /* Update fastboot common message */
+  STATIC BOOLEAN IsFastbootCommonMsgInit = FALSE;
+
   for (i = 0; i < ARRAY_SIZE (mFastbootCommonMsgInfo); i++) {
-    switch (i) {
-    case 0:
-      break;
-    case 1:
-      /* Get product name */
-      AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
-        sizeof (mFastbootCommonMsgInfo[i].Msg), PRODUCT_NAME,
-        AsciiStrLen (PRODUCT_NAME));
-      break;
-    case 2:
-      /* Get variant value */
-      BoardHwPlatformName (StrTemp, sizeof (StrTemp));
-      GetRootDeviceType (StrTemp1, sizeof (StrTemp1));
+    if (!IsFastbootCommonMsgInit) {
+      switch (i) {
+      case 0:
+        break;
+      case 1:
+        /* Get product name */
+        AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+          sizeof (mFastbootCommonMsgInfo[i].Msg), PRODUCT_NAME,
+          AsciiStrLen (PRODUCT_NAME));
+        break;
+      case 2:
+        /* Get variant value */
+        BoardHwPlatformName (StrTemp, sizeof (StrTemp));
+        GetRootDeviceType (StrTemp1, sizeof (StrTemp1));
 
-      AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
-                     sizeof (mFastbootCommonMsgInfo[i].Msg), StrTemp,
-                     sizeof (StrTemp));
-      AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
-                     sizeof (mFastbootCommonMsgInfo[i].Msg), " ",
-                     AsciiStrLen (" "));
-      AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
-                     sizeof (mFastbootCommonMsgInfo[i].Msg), StrTemp1,
-                     sizeof (StrTemp1));
-      break;
-    case 3:
-      /* Get bootloader version */
-      GetBootloaderVersion (VersionTemp, sizeof (VersionTemp));
-      AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
-                     sizeof (mFastbootCommonMsgInfo[i].Msg), VersionTemp,
-                     sizeof (VersionTemp));
-      break;
-    case 4:
-      /* Get baseband version */
-      ZeroMem (VersionTemp, sizeof (VersionTemp));
-      GetRadioVersion (VersionTemp, sizeof (VersionTemp));
-      AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
-                     sizeof (mFastbootCommonMsgInfo[i].Msg), VersionTemp,
-                     sizeof (VersionTemp));
-      break;
-    case 5:
-      /* Get serial number */
-      ZeroMem (StrTemp, sizeof (StrTemp));
-      BoardSerialNum (StrTemp, MAX_RSP_SIZE);
-      AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
-                     sizeof (mFastbootCommonMsgInfo[i].Msg), StrTemp,
-                     sizeof (StrTemp));
-      break;
-    case 6:
-      /* Get secure boot value */
-      AsciiStrnCatS (
-          mFastbootCommonMsgInfo[i].Msg, sizeof (mFastbootCommonMsgInfo[i].Msg),
-          IsSecureBootEnabled () ? "yes" : "no",
-          IsSecureBootEnabled () ? AsciiStrLen ("yes") : AsciiStrLen ("no"));
-      break;
-    case 7:
-      /* Get device status */
-      AsciiStrnCatS (
-          mFastbootCommonMsgInfo[i].Msg, sizeof (mFastbootCommonMsgInfo[i].Msg),
-          IsUnlocked () ? "unlocked" : "locked",
-          IsUnlocked () ? AsciiStrLen ("unlocked") : AsciiStrLen ("locked"));
-      break;
+        AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+                      sizeof (mFastbootCommonMsgInfo[i].Msg), StrTemp,
+                      sizeof (StrTemp));
+        AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+                      sizeof (mFastbootCommonMsgInfo[i].Msg), " ",
+                      AsciiStrLen (" "));
+        AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+                      sizeof (mFastbootCommonMsgInfo[i].Msg), StrTemp1,
+                      sizeof (StrTemp1));
+        break;
+      case 3:
+        /* Get bootloader version */
+        GetBootloaderVersion (VersionTemp, sizeof (VersionTemp));
+        AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+                      sizeof (mFastbootCommonMsgInfo[i].Msg), VersionTemp,
+                      sizeof (VersionTemp));
+        break;
+      case 4:
+        /* Get baseband version */
+        ZeroMem (VersionTemp, sizeof (VersionTemp));
+        GetRadioVersion (VersionTemp, sizeof (VersionTemp));
+        AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+                      sizeof (mFastbootCommonMsgInfo[i].Msg), VersionTemp,
+                      sizeof (VersionTemp));
+        break;
+      case 5:
+        /* Get serial number */
+        ZeroMem (StrTemp, sizeof (StrTemp));
+        BoardSerialNum (StrTemp, MAX_RSP_SIZE);
+        AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+                      sizeof (mFastbootCommonMsgInfo[i].Msg), StrTemp,
+                      sizeof (StrTemp));
+        break;
+      case 6:
+        /* Get secure boot value */
+        AsciiStrnCatS (
+            mFastbootCommonMsgInfo[i].Msg, sizeof (mFastbootCommonMsgInfo[i].Msg),
+            IsSecureBootEnabled () ? "yes" : "no",
+            IsSecureBootEnabled () ? AsciiStrLen ("yes") : AsciiStrLen ("no"));
+        break;
+      case 7:
+        /* Get device status */
+        AsciiStrnCatS (
+            mFastbootCommonMsgInfo[i].Msg, sizeof (mFastbootCommonMsgInfo[i].Msg),
+            IsUnlocked () ? "unlocked" : "locked",
+            IsUnlocked () ? AsciiStrLen ("unlocked") : AsciiStrLen ("locked"));
+        break;
+      }
     }
-
     mFastbootCommonMsgInfo[i].Location = Location;
     Status = DrawMenu (&mFastbootCommonMsgInfo[i], &Height);
     if (Status != EFI_SUCCESS)
       return Status;
     Location += Height;
   }
-
+  IsFastbootCommonMsgInit = TRUE;
   OptionMenuInfo->Info.MenuType = DISPLAY_MENU_FASTBOOT;
   OptionMenuInfo->Info.OptionNum = OptionTotal;
 
