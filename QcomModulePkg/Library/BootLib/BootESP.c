@@ -162,7 +162,7 @@ LoadBootA64AndStart()
   EFI_HANDLE *Handles = NULL;
   UINTN HandleCount = 0;
   UINTN Idx;
-  gBS->RestoreTPL (TPL_APPLICATION);
+  // gBS->RestoreTPL (TPL_APPLICATION);
 
   DEBUG((DEBUG_INFO, "LoadBootA64AndStart: try find bootable image\n"));
   
@@ -239,6 +239,78 @@ free:
   return Status;
 }
 
+EFI_STATUS
+EFIAPI
+CheckBootAA64(){
+  EFI_STATUS Status = EFI_NOT_FOUND;
+  EFI_HANDLE *Handles = NULL;
+  UINTN HandleCount = 0;
+  UINTN Idx;
+
+  DEBUG((DEBUG_INFO, "CheckBootAA64: try find bootable image\n"));
+  
+  Status =
+      gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid,
+                               NULL, &HandleCount, &Handles);
+  if (EFI_ERROR (Status) || HandleCount == 0 || Handles == NULL) {
+    DEBUG ((DEBUG_INFO,
+            "CheckBootAA64: no SimpleFileSystem handles: %r\n", Status));
+    return EFI_NOT_FOUND;
+  }
+
+  for (Idx = 0; Idx < HandleCount; Idx++) {
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *Fs = NULL;
+    EFI_FILE_PROTOCOL *Root = NULL;
+    EFI_FILE_PROTOCOL *File = NULL;
+    EFI_DEVICE_PATH_PROTOCOL *BootFileDevicePath = NULL;
+
+    Status = gBS->HandleProtocol (
+        Handles[Idx], &gEfiSimpleFileSystemProtocolGuid, (VOID **)&Fs);
+    if (EFI_ERROR (Status) || (Fs == NULL)) {
+      continue;
+    }
+
+    Status = Fs->OpenVolume (Fs, &Root);
+    if (EFI_ERROR (Status) || (Root == NULL)) {
+      continue;
+    }
+
+    Status =
+        Root->Open (Root, &File, (CHAR16 *)BootA64Path, EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR (Status) || (File == NULL)) {
+      Root->Close (Root);
+      Root = NULL;
+      continue;
+    }
+
+    File->Close (File);
+    File = NULL;
+    Root->Close (Root);
+    Root = NULL;
+
+    BootFileDevicePath = FileDevicePath (Handles[Idx], BootA64Path);
+    if (BootFileDevicePath == NULL) {
+      DEBUG ((DEBUG_INFO, "CheckBootAA64: FileDevicePath failed\n"));
+      continue;
+    }
+
+    // Found BOOTAA64.EFI
+    Status = EFI_SUCCESS;
+
+    FreePool (BootFileDevicePath);
+    goto free;
+  }
+
+free:
+  gBS->FreePool (Handles);
+  if (EFI_ERROR(Status)) {
+    DEBUG ((DEBUG_INFO, "CheckBootAA64: BOOTAA64.EFI not found: %r\n", Status));
+  } else {
+    DEBUG ((DEBUG_INFO, "CheckBootAA64: BOOTAA64.EFI found\n"));
+  }
+  return Status;
+}
+
 /**
   Entry point called from ABL to boot ESP image.
 */
@@ -265,7 +337,7 @@ BootESP (VOID)
     SignalGuidEvent (&gEfiEndOfDxeEventGroupGuid);
   }
 
-  // Signal a few well-known GUID events
+  // Signal SD detection event
   SignalGuidEvent (&gEfiEventDetectSDCardGuid);
   ConnectAllControllers ();
 
@@ -279,4 +351,69 @@ BootESP (VOID)
   gBS->RaiseTPL (CurrentTPL);
   DisplayFastbootMenu ();
   return Status;
+}
+
+BOOLEAN
+EFIAPI
+CheckSdAndESP (VOID)
+{
+    EFI_STATUS Status;
+    EFI_HANDLE *HandleBuffer = NULL;
+    UINTN HandleCount = 0;
+    BOOLEAN SDPresent = FALSE;
+
+    // Backup Current TPL
+    EFI_TPL CurrentTPL = gBS->RaiseTPL (TPL_HIGH_LEVEL);
+    // Reduce TPL to Application for further operations
+    gBS->RestoreTPL (TPL_APPLICATION);
+
+    EFI_HANDLE *TempHandles = NULL;
+    UINTN HandleCountBefore = 0;
+
+    // Get handle count before signaling SD detection
+    Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid,
+                      NULL, &HandleCountBefore, &TempHandles);
+    if (TempHandles != NULL) {
+      gBS->FreePool (TempHandles);
+      TempHandles = NULL;
+    }
+
+    DEBUG ((DEBUG_INFO, "ScanSD: HandleCount before signal = %u\n", (UINT32)HandleCountBefore));
+
+    // Signal SD detection event and connect controllers so new volumes can appear
+    SignalGuidEvent (&gEfiEventDetectSDCardGuid);
+    ConnectAllControllers ();
+
+    // Get handle count after signaling
+    Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid,
+                      NULL, &HandleCount, &HandleBuffer);
+    if (EFI_ERROR (Status) || HandleCount == 0 || HandleBuffer == NULL) {
+      DEBUG ((DEBUG_INFO, "ScanSD: no SimpleFileSystem handles after signal: %r\n", Status));
+      Status = EFI_NOT_FOUND;
+      goto cleanup;
+    }
+
+    DEBUG ((DEBUG_INFO, "ScanSD: HandleCount after signal = %u\n", (UINT32)HandleCount));
+
+    if (HandleCount > HandleCountBefore) {
+      SDPresent = TRUE;
+      DEBUG ((DEBUG_INFO, "ScanSD: Detected SD/MMC\n"));
+    }
+
+    if (HandleBuffer != NULL) {
+        gBS->FreePool (HandleBuffer);
+        DEBUG((DEBUG_INFO, "ScanSD: Freed HandleBuffer %p\n", HandleBuffer));
+    }
+
+    DEBUG((DEBUG_INFO, "ScanSD: SDPresent=%d\n", SDPresent));
+
+    // If SD is present, check for BootAA64.EFI in ESP
+    // no matter ESP Partition on ufs or SD, grub will find available rootfs by default.
+    // Rootfs on SD card has higher priority.
+    SDPresent = SDPresent && !EFI_ERROR(CheckBootAA64());
+
+cleanup:
+    // Restore original TPL
+    gBS->RaiseTPL (CurrentTPL);
+    return SDPresent;
 }

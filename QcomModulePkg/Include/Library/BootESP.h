@@ -8,4 +8,8 @@ EFI_STATUS
 EFIAPI
 BootESP (VOID);
 
+BOOLEAN
+EFIAPI
+CheckSdAndESP (VOID);
+
 #endif // __BOOTESP_H__

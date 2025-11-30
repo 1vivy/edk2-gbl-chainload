@@ -84,6 +84,7 @@
 #include <Library/UpdateCmdLine.h>
 #include <Protocol/EFICardInfo.h>
 #include <Library/LoadFVLib.h>
+#include <Library/BootESP.h>
 
 #define MAX_APP_STR_LEN 64
 #define MAX_NUM_FS 10
