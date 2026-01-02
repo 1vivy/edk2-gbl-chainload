@@ -117,6 +117,9 @@
   !if $(VERIFIED_BOOT_LE)
       GCC:*_*_*_CC_FLAGS = -DVERIFIED_BOOT_LE
   !endif
+  !if $(ROOT_PARTLABEL_SUPPORT)
+      GCC:*_*_*_CC_FLAGS = -DROOT_PARTLABEL_SUPPORT
+  !endif
   !if $(SUPPORT_AB_BOOT_LXC)
       GCC:*_*_*_CC_FLAGS = -DSUPPORT_AB_BOOT_LXC
   !endif
