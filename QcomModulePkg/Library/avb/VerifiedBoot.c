@@ -26,12 +26,10 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/*
- * Changes from Qualcomm Innovation Center, Inc. are provided
- * under the following license:
- * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+/* Changes from Qualcomm Technologies, Inc. are provided under the following license:
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * SPDX-License-Identifier: BSD-3-Clause-Clear
- */
+*/
 
 #include "VerifiedBoot.h"
 #include "BootLinux.h"
@@ -617,6 +615,22 @@ ErrV3:
 }
 
 STATIC EFI_STATUS
+#if DISABLE_DTBO_PARTITION
+LoadImageNoAuth (BootInfo *Info)
+{
+  EFI_STATUS Status = EFI_SUCCESS;
+  UINT32 PageSize = 0;
+  BOOLEAN FastbootPath;
+
+  Status = LoadBootImageNoAuth (Info, &PageSize, &FastbootPath);
+  if (Status != EFI_SUCCESS) {
+    return Status;
+  }
+  DEBUG ((EFI_D_INFO, "Skip load dtbo partition\n"));
+
+  return EFI_SUCCESS;
+}
+#else
 LoadImageNoAuth (BootInfo *Info)
 {
   EFI_STATUS Status = EFI_SUCCESS;
@@ -693,6 +707,7 @@ Err:
 err_out:
   return Status;
 }
+#endif
 
 STATIC EFI_STATUS
 LoadImageNoAuthWrapper (BootInfo *Info)
