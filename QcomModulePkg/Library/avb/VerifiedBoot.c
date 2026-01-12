@@ -1788,7 +1788,7 @@ LoadImageAndAuthVB2 (BootInfo *Info, BOOLEAN HibernationResume,
   }
 #endif
 #ifdef ENABLE_LE_VARIANT // Only in case where AVB is enabled on LE Build.
-  if (!IsRootCmdLineUpdated (Info)) {
+  if (!IsRootCmdLineUpdated (Info) && !HibernationResume) {
     CHAR8 *SystemPath = NULL;
     UINT32 SystemPathLen = 0;
     SystemPathLen = GetSystemPath (&SystemPath, Info->MultiSlotBoot,
