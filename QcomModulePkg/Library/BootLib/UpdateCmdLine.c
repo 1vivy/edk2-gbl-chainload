@@ -382,6 +382,8 @@ STATIC EFI_STATUS GetGpuCmdline (VOID)
 {
   EFI_STATUS Status;
 
+  GpuCmdLineLen = sizeof (GpuCmdLine);
+
   Status = gRT->GetVariable ((CHAR16 *)L"GpuConfiguration",
                              &gQcomTokenSpaceGuid, NULL, &GpuCmdLineLen,
                              GpuCmdLine);
