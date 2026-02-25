@@ -3278,6 +3278,13 @@ CmdOemSetHwFenceValue (CONST CHAR8 *arg, VOID *data, UINT32 Size)
     }
   }
 
+  if ((AsciiStrLen(arg) != 1) || (arg[0] != '0' && arg[0] != '1')) {
+    AsciiStrnCatS (Resp, sizeof (Resp), "invalid input (must be 0 or 1)",
+                  AsciiStrLen ("invalid input (must be 0 or 1)"));
+    FastbootFail (Resp);
+    return;
+  }
+
   AsciiStrnCatS (HwFenceValue,
                  MAX_DISPLAY_PANEL_OVERRIDE,
                  arg,
