@@ -2215,6 +2215,7 @@ get_ptn_name:
 
   AVBVersion = GetAVBVersion ();
   DEBUG ((EFI_D_VERBOSE, "AVB version %d\n", AVBVersion));
+  BOOLEAN ShouldSendMilestone = (AVBVersion != AVB_LE);
 
   /* Load and Authenticate */
   switch (AVBVersion) {
@@ -2264,6 +2265,15 @@ get_ptn_name:
 
   if (AVBVersion != AVB_LE) {
     DisplayVerifiedBootScreen (Info);
+  }
+// Send milestone call for non-LE or LE with SEND_MILESTONE_CALL_LE enabled
+#ifdef SEND_MILESTONE_CALL_LE
+  if (AVBVersion == AVB_LE && KeymasterEnabled) {
+    ShouldSendMilestone = TRUE;
+  }
+#endif
+
+  if (ShouldSendMilestone) {
     DEBUG ((EFI_D_VERBOSE, "Sending Milestone Call\n"));
     Status = Info->VbIntf->VBSendMilestone (Info->VbIntf);
     if (Status != EFI_SUCCESS) {
@@ -2271,6 +2281,7 @@ get_ptn_name:
       return Status;
     }
   }
+
   return Status;
 }
 
