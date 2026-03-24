@@ -107,18 +107,60 @@ EnableChargingScreen (BOOLEAN IsEnabled)
   return Status;
 }
 
+BOOLEAN
+IsAllowedAudioFramework (IN CONST CHAR8 *Value)
+{
+  STATIC CONST CHAR8 *AllowedAudFrmwrk[] = { "elite", "audioreach"};
+  UINTN ValLen, AlowdAudLen, i;
+
+  if (Value == NULL) {
+    return FALSE;
+  }
+
+  ValLen = AsciiStrnLenS (Value, MAX_AUDIO_FW_LENGTH);
+  if (ValLen == 0 || ValLen >= MAX_AUDIO_FW_LENGTH) {
+    return FALSE;
+  }
+
+  for (i = 0; i < ARRAY_SIZE (AllowedAudFrmwrk); i++) {
+    AlowdAudLen = AsciiStrnLenS (AllowedAudFrmwrk[i], MAX_AUDIO_FW_LENGTH);
+    if (ValLen == AlowdAudLen &&
+       AsciiStrnCmp (Value, AllowedAudFrmwrk[i], AlowdAudLen) == 0) {
+      return TRUE;
+    }
+  }
+
+  return FALSE;
+}
+
 EFI_STATUS
 StoreAudioFrameWork (CONST CHAR8 *CmdLine, UINT32 CmdLineLen)
 {
   EFI_STATUS Status = EFI_SUCCESS;
 
-  if (CmdLineLen > ARRAY_SIZE (DevInfo.AudioFramework)) {
-    DEBUG ((EFI_D_ERROR, "Audio framework is invalid, size too large!\n"));
-    return EFI_OUT_OF_RESOURCES;
+  if (CmdLine == NULL || CmdLineLen == 0) {
+    return EFI_INVALID_PARAMETER;
   }
+
+  if (CmdLineLen >= ARRAY_SIZE (DevInfo.AudioFramework)) {
+    DEBUG ((EFI_D_ERROR, "Audio framework is invalid, size too large!\n"));
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (CmdLine[CmdLineLen] != '\0') {
+    DEBUG ((EFI_D_ERROR, "Audio framework is Ivalid (Terminator)\n"));
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (!IsAllowedAudioFramework (CmdLine)) {
+    DEBUG ((EFI_D_ERROR, "Audio framework is Invalid, unrecognizable cmd\n"));
+    return EFI_INVALID_PARAMETER;
+  }
+
 
   gBS->SetMem (DevInfo.AudioFramework, sizeof (DevInfo.AudioFramework), 0);
   gBS->CopyMem (DevInfo.AudioFramework, (CHAR8 *) CmdLine, CmdLineLen);
+  DevInfo.AudioFramework[CmdLineLen] = '\0';
 
   Status =
       ReadWriteDeviceInfo (WRITE_CONFIG, (VOID *)&DevInfo, sizeof (DevInfo));
@@ -134,15 +176,20 @@ ReadAudioFrameWork (CHAR8 **CmdLine, UINT32 *CmdLineLen)
 {
   EFI_STATUS Status = EFI_SUCCESS;
 
-  Status =
-      ReadWriteDeviceInfo (READ_CONFIG, (VOID *)&DevInfo, sizeof (DevInfo));
-  if (Status != EFI_SUCCESS) {
+  if (CmdLine == NULL || CmdLineLen == NULL) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if (FirstReadDevInfo == TRUE) {
+    Status = EFI_NOT_STARTED;
+
     DEBUG ((EFI_D_ERROR, "Unable to read audio framework: %r\n", Status));
     return Status;
   }
 
+  DevInfo.AudioFramework[ARRAY_SIZE (DevInfo.AudioFramework) - 1] = '\0';
   *CmdLine = DevInfo.AudioFramework;
-  *CmdLineLen = ARRAY_SIZE (DevInfo.AudioFramework);
+  *CmdLineLen = (UINT32)AsciiStrLen (DevInfo.AudioFramework);
 
   return Status;
 }
