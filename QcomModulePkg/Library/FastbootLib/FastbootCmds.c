@@ -4044,18 +4044,22 @@ Exit:
   return Status;
 }
 
-/* `oem boot_efi`: LoadImage + StartImage on the contents of the staging
+/* `oem boot-efi`: LoadImage + StartImage on the contents of the staging
  * buffer. Android `fastboot stage` is just `download:` on the wire — the
  * payload lands in mUsbDataBuffer (set by CmdDownload). The pointer swap
  * + size copy that move it to mFlashDataBuffer/mFlashNumDataBytes happens
  * in ExchangeFlashAndUsbDataBuf(), which CmdFlash calls at its top. We
  * mirror that contract here.
+
+ * Naming convention follows the rest of the OEM verbs in this cmd_list
+ * (`oem off-mode-charge`, `oem set-hw-fence-value`, `oem device-info`):
+ * kebab-case, not snake_case.
  *
  * Caveat (documented discipline, not enforced in code): a `flash:` or
- * subsequent `download:` between `stage` and `oem boot_efi` will overwrite
+ * subsequent `download:` between `stage` and `oem boot-efi` will overwrite
  * the buffer. Don't interleave.
  *
- * Nested boot_efi: when the staged image itself calls FastbootInitialize
+ * Nested boot-efi: when the staged image itself calls FastbootInitialize
  * a fresh transfer buffer is allocated for that nested fastboot session
  * (see FastbootCmdsInit:2620), so loading an EFI from inside a loaded
  * EFI is naturally supported.
@@ -4182,7 +4186,7 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
       {"getvar:", CmdGetVar},
       {"download:", CmdDownload},
       {"oem audio-framework", CmdOemAudioFrameWork},
-      {"oem boot_efi", CmdOemBootEfi},
+      {"oem boot-efi", CmdOemBootEfi},
   };
 
   /* Register the commands only for non-user builds */
