@@ -4044,6 +4044,57 @@ Exit:
   return Status;
 }
 
+/* `oem boot_efi`: LoadImage + StartImage on the contents of the staging
+ * buffer. Android `fastboot stage` is just `download:` on the wire, so the
+ * payload already lives in mFlashDataBuffer (post-ExchangeFlashAndUsbDataBuf
+ * swap). No new wire command needed.
+ *
+ * Caveat (documented discipline, not enforced in code): a `flash:` or
+ * subsequent `download:` between `stage` and `oem boot_efi` will overwrite
+ * the buffer. Don't interleave.
+ *
+ * StartImage does not return on a successful boot — control transfers to
+ * the staged image. If we get back here it's because the image returned
+ * (rare for boot loaders) or LoadImage/StartImage failed.
+ */
+STATIC VOID
+CmdOemBootEfi (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  EFI_STATUS Status;
+  EFI_HANDLE ImageHandle = NULL;
+  CHAR8 Resp[MAX_RSP_SIZE];
+
+  if (mFlashDataBuffer == NULL || mFlashNumDataBytes == 0) {
+    FastbootFail ("no staged image — run `fastboot stage <file>` first");
+    return;
+  }
+
+  AsciiSPrint (Resp, sizeof (Resp),
+               "loading staged %llu bytes", mFlashNumDataBytes);
+  FastbootInfo (Resp);
+
+  Status = gBS->LoadImage (FALSE, gImageHandle, NULL,
+                           mFlashDataBuffer, mFlashNumDataBytes,
+                           &ImageHandle);
+  if (EFI_ERROR (Status)) {
+    AsciiSPrint (Resp, sizeof (Resp), "LoadImage failed: %r", Status);
+    FastbootFail (Resp);
+    return;
+  }
+
+  /* Tell the host the boot is launching, then transfer control. We do
+   * NOT call FastbootOkay here because StartImage does not return on
+   * success. If it does return, we'll respond after with the failure. */
+  FastbootInfo ("starting staged image…");
+
+  Status = gBS->StartImage (ImageHandle, NULL, NULL);
+
+  /* Only reachable on failure or unusual return from a non-bootloader EFI. */
+  AsciiSPrint (Resp, sizeof (Resp),
+               "StartImage returned %r (image returned to caller)", Status);
+  FastbootFail (Resp);
+}
+
 /* Registers all Stock commands, Publishes all stock variables
  * and partitiion sizes. base and size are the respective parameters
  * to the Fastboot Buffer used to store the downloaded image for flashing
@@ -4118,6 +4169,7 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
       {"getvar:", CmdGetVar},
       {"download:", CmdDownload},
       {"oem audio-framework", CmdOemAudioFrameWork},
+      {"oem boot_efi", CmdOemBootEfi},
   };
 
   /* Register the commands only for non-user builds */
