@@ -437,6 +437,14 @@ flashless_boot:
       goto fastboot;
   }
   else {
+    // Check Default boot path and try boot to it
+    if(!BootIntoRecovery) {
+      if ((ReadBootPath () == BOOT_PATH_ESP) && (CheckSdAndESP())) {
+        // Boot to ESP
+        BootESP ();
+      }
+    }
+
     BootInfo Info = {0};
     Info.MultiSlotBoot = MultiSlotBoot;
     Info.BootIntoRecovery = BootIntoRecovery;
@@ -460,6 +468,9 @@ flashless_boot:
   }
 
 fastboot:
+  /* Signal SD card detection event */
+  SignalSDDetection();
+
   /* Load Drivers from current FV */
   LoadDriversFromCurrentFv(ImageHandle);
 

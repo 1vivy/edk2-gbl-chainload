@@ -15,15 +15,18 @@
 #include <Library/DevicePathLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include <Library/UefiBootServicesTableLib.h>
+#include <Library/UefiRuntimeServicesTableLib.h>
 #include <Library/UefiLib.h>
 #include <Uefi.h>
-
+#include <Library/MenuKeysDetection.h>
+#include <Library/FastbootMenu.h>
+#include <Protocol/DiskIo.h>
 #include <Guid/EventGroup.h>
 #include <Protocol/DevicePath.h>
 #include <Protocol/EFIDisplayPwr.h>
 #include <Protocol/SimpleFileSystem.h>
-#include <Library/MenuKeysDetection.h>
-#include <Library/FastbootMenu.h>
+#include <Protocol/EFIDisplayUtils.h>
+#include <Library/DrawUI.h>
 
 STATIC CONST CHAR16 BootA64Path[] = L"\\EFI\\BOOT\\BOOTAA64.EFI";
 STATIC CONST EFI_GUID gEfiEventDetectSDCardGuid = {
@@ -36,10 +39,10 @@ STATIC EFI_DISPLAY_POWER_PROTOCOL *mDisplayPowerProtocol = NULL;
 
 // Initialize the Display Power Protocol if available
 STATIC
-VOID
+EFI_STATUS
 InitializeDisplayPowerProtocol (VOID)
 {
-  EFI_STATUS Status;
+  EFI_STATUS Status = EFI_SUCCESS;
 
   mDisplayPowerProtocol = NULL;
   Status = gBS->LocateProtocol (&gEfiDisplayPowerStateProtocolGuid, NULL,
@@ -49,7 +52,7 @@ InitializeDisplayPowerProtocol (VOID)
             "InitializeDisplayPowerProtocol: no display power protocol: %r\n",
             Status));
     mDisplayPowerProtocol = NULL;
-    return;
+    return Status;
   }
 
   // query current state and try a test set to ensure it's usable
@@ -59,10 +62,9 @@ InitializeDisplayPowerProtocol (VOID)
   if (!EFI_ERROR (Status)) {
     DEBUG ((DEBUG_INFO, "InitializeDisplayPowerProtocol: current state=%d\n",
             CurState));
-    // Try to set On briefly to validate Set function (ignore errors)
-    (void)mDisplayPowerProtocol->SetDisplayPowerState (mDisplayPowerProtocol,
-                                                       EfiDisplayPowerStateOn);
   }
+
+  return Status;
 }
 
 // ExitBootServices notify callback to turn display off
@@ -79,14 +81,14 @@ DisableDisplayOnExitBootServices (IN EFI_EVENT Event, IN VOID *Context)
 // Register callback for ExitBootServices to disable display
 STATIC
 VOID
-RegisterExitBootServicesDisplayCallback (VOID)
-{
+RegisterExitBootServicesDisplayCallback (
+  EFI_EVENT *Event
+){
   EFI_STATUS Status;
-  EFI_EVENT Event = NULL;
 
   Status = gBS->CreateEvent (EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_CALLBACK,
-                             DisableDisplayOnExitBootServices, NULL, &Event);
-  if (EFI_ERROR (Status) || Event == NULL) {
+                             DisableDisplayOnExitBootServices, NULL, Event);
+  if (EFI_ERROR (Status) || *Event == NULL) {
     DEBUG ((DEBUG_INFO,
             "RegisterExitBootServicesDisplayCallback: CreateEvent failed: %r\n",
             Status));
@@ -150,6 +152,13 @@ SignalGuidEvent (CONST EFI_GUID *EventGuid)
 
   gBS->SignalEvent (Event);
   gBS->CloseEvent (Event);
+}
+
+EFIAPI
+VOID
+SignalSDDetection(VOID){
+  SignalGuidEvent (&gEfiEventDetectSDCardGuid);
+  ConnectAllControllers ();
 }
 
 // Try to find and load BOOTAA64 from any simple file system.
@@ -319,7 +328,7 @@ EFIAPI
 BootESP (VOID)
 {
   EFI_STATUS Status = EFI_SUCCESS;
-  ExitMenuKeysDetection();
+  EFI_EVENT DisplayPowerEvent = NULL;
   // Backup Current TPL
   EFI_TPL CurrentTPL = gBS->RaiseTPL (TPL_HIGH_LEVEL);
   // Reduce TPL to Application for further operations
@@ -330,26 +339,32 @@ BootESP (VOID)
   if (FirstCall) {
     FirstCall = FALSE;
     // Initialize display protocol and register ExitBootServices callback
-    InitializeDisplayPowerProtocol ();
-    RegisterExitBootServicesDisplayCallback ();
-
     SignalGuidEvent (&gEfiEventReadyToBootGuid);
     SignalGuidEvent (&gEfiEndOfDxeEventGroupGuid);
   }
 
-  // Signal SD detection event
-  SignalGuidEvent (&gEfiEventDetectSDCardGuid);
-  ConnectAllControllers ();
+  if (!EFI_ERROR(InitializeDisplayPowerProtocol ())) {
+    RegisterExitBootServicesDisplayCallback(&DisplayPowerEvent);
+  }
 
+  // Signal SD detection event
+  SignalSDDetection();
+  
   // Load and start BOOTAA64.EFI
   Status = LoadBootA64AndStart ();
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_ERROR, "BootESP: LoadBootA64AndStart failed: %r\n", Status));
   }
 
+  // If boot failure, unregister the display power protocol
+  if (EFI_ERROR (Status) && DisplayPowerEvent != NULL) {
+    gBS->CloseEvent (DisplayPowerEvent);
+    DisplayPowerEvent = NULL;
+  }
+
   // Restore original TPL
   gBS->RaiseTPL (CurrentTPL);
-  DisplayFastbootMenu ();
+
   return Status;
 }
 
@@ -361,7 +376,6 @@ CheckSdAndESP (VOID)
     EFI_HANDLE *HandleBuffer = NULL;
     UINTN HandleCount = 0;
     BOOLEAN SDPresent = FALSE;
-
     // Backup Current TPL
     EFI_TPL CurrentTPL = gBS->RaiseTPL (TPL_HIGH_LEVEL);
     // Reduce TPL to Application for further operations
@@ -381,8 +395,7 @@ CheckSdAndESP (VOID)
     DEBUG ((DEBUG_INFO, "ScanSD: HandleCount before signal = %u\n", (UINT32)HandleCountBefore));
 
     // Signal SD detection event and connect controllers so new volumes can appear
-    SignalGuidEvent (&gEfiEventDetectSDCardGuid);
-    ConnectAllControllers ();
+    SignalSDDetection();
 
     // Get handle count after signaling
     Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid,
@@ -411,9 +424,187 @@ CheckSdAndESP (VOID)
     // no matter ESP Partition on ufs or SD, grub will find available rootfs by default.
     // Rootfs on SD card has higher priority.
     SDPresent = SDPresent && !EFI_ERROR(CheckBootAA64());
-
 cleanup:
     // Restore original TPL
     gBS->RaiseTPL (CurrentTPL);
     return SDPresent;
+}
+
+STATIC EFI_STATUS
+DisplaySetVariable (CHAR16 *VariableName, VOID *VariableValue, UINTN DataSize)
+{
+  EFI_STATUS Status = EFI_SUCCESS;
+  BOOLEAN RTVariable = FALSE;
+  EfiQcomDisplayUtilsProtocol *pDisplayUtilsProtocol = NULL;
+
+  Status = gBS->LocateProtocol (&gQcomDisplayUtilsProtocolGuid,
+                                NULL,
+                                (VOID **)&pDisplayUtilsProtocol);
+  if ((EFI_ERROR (Status)) ||
+      (pDisplayUtilsProtocol == NULL)) {
+    RTVariable = TRUE;
+  } else if (pDisplayUtilsProtocol->Revision <  0x20000) {
+    RTVariable = TRUE;
+  } else {
+    /* The display utils version for 0x20000 and above can support
+       display protocol to get and set variable */
+    Status = pDisplayUtilsProtocol->DisplayUtilsSetVariable (
+          VariableName,
+          (UINT8 *)VariableValue,
+          DataSize,
+          0);
+  }
+
+  if (RTVariable) {
+    Status = gRT->SetVariable (VariableName,
+                               &gQcomTokenSpaceGuid,
+                               EFI_VARIABLE_RUNTIME_ACCESS |
+                               EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                               EFI_VARIABLE_NON_VOLATILE,
+                               DataSize,
+                               (VOID *)VariableValue);
+  }
+
+  if (Status == EFI_NOT_FOUND) {
+    // EFI_NOT_FOUND is not an error for retail case.
+    Status = EFI_SUCCESS;
+  } else if (EFI_ERROR (Status)) {
+    DEBUG ((EFI_D_VERBOSE,
+        "Display set variable failed with status(%d)!\n", Status));
+  }
+
+  return Status;
+}
+
+STATIC EFI_STATUS
+DisplayGetVariable (CHAR16 *VariableName, VOID *VariableValue, UINTN *DataSize)
+{
+  EFI_STATUS Status = EFI_SUCCESS;
+  BOOLEAN RTVariable = FALSE;
+  EfiQcomDisplayUtilsProtocol *pDisplayUtilsProtocol = NULL;
+
+  Status = gBS->LocateProtocol (&gQcomDisplayUtilsProtocolGuid,
+                                NULL,
+                                (VOID **)&pDisplayUtilsProtocol);
+  if ((EFI_ERROR (Status)) ||
+      (pDisplayUtilsProtocol == NULL)) {
+    RTVariable = TRUE;
+  } else if (pDisplayUtilsProtocol->Revision <  0x20000) {
+    RTVariable = TRUE;
+  } else {
+    /* The display utils version for 0x20000 and above can support
+       display protocol to get and set variable */
+    Status = pDisplayUtilsProtocol->DisplayUtilsGetVariable (
+          VariableName,
+          (UINT8 *)VariableValue,
+          DataSize,
+          0);
+  }
+
+  if (RTVariable) {
+    Status = gRT->GetVariable (VariableName,
+                               &gQcomTokenSpaceGuid,
+                               NULL,
+                               DataSize,
+                               (VOID *)VariableValue);
+  }
+
+  if (Status == EFI_NOT_FOUND) {
+    // EFI_NOT_FOUND is not an error for retail case.
+    Status = EFI_SUCCESS;
+  } else if (EFI_ERROR (Status)) {
+    DEBUG ((EFI_D_VERBOSE,
+        "Display get variable failed with status(%d)!\n", Status));
+  }
+
+  return Status;
+}
+
+
+EFI_STATUS
+EFIAPI
+SetBootPath(
+  IN BOOT_PATH BootESP
+){
+  EFI_STATUS Status = EFI_SUCCESS;
+
+  // Check validity
+  if (BootESP != BOOT_PATH_ANDROID && BootESP != BOOT_PATH_ESP) {
+    DEBUG((DEBUG_WARN, "SetBootPath: Invalid BootESP value %u, set to android\n", BootESP));
+    BootESP = BOOT_PATH_ANDROID;
+  }
+
+  Status = DisplaySetVariable((CHAR16 *)L"OSBootPath",
+                              &BootESP,
+                              sizeof(BootESP));
+  if (EFI_ERROR(Status)) {
+    DEBUG((DEBUG_WARN, "SetBootPath: Failed to set OSBootPath variable: %r\n", Status));
+  } else {
+    DEBUG((DEBUG_INFO, "SetBootPath: OSBootPath saved = %u\n", BootESP));
+  }
+
+  return Status;
+}
+
+BOOT_PATH
+EFIAPI
+ReadBootPath(VOID)
+{
+  EFI_STATUS Status = EFI_SUCCESS;
+  BOOT_PATH BootESP = BOOT_PATH_UNKNOWN;
+  UINTN Size = sizeof(BootESP);
+
+  Status = DisplayGetVariable(L"OSBootPath", &BootESP, &Size);
+
+  if (EFI_ERROR(Status)) {
+    DEBUG((DEBUG_INFO, "ReadBootPath: Failed to read OSBootPath variable: %r\n", Status));
+    if (Status == EFI_NOT_FOUND) {
+      // Variable does not exist: use default = BOOT_PATH_ANDROID
+      DEBUG((DEBUG_INFO, "ReadBootPath: OSBootPath variable not found, default to android\n"));
+      SetBootPath(BOOT_PATH_ANDROID);
+    }
+    BootESP = BOOT_PATH_ANDROID; // Default to Android
+  }
+
+  // Check validity
+  if (BootESP != BOOT_PATH_ANDROID && BootESP != BOOT_PATH_ESP) {
+    DEBUG((DEBUG_WARN, "ReadBootPath: Invalid OSBootPath value %u, reset to android\n", BootESP));
+    BootESP = BOOT_PATH_ANDROID;
+    SetBootPath(BOOT_PATH_ANDROID);
+  }
+
+  DEBUG((DEBUG_INFO, "ReadBootPath: OSBootPath read = %u\n", BootESP));
+  return BootESP;
+}
+
+EFI_STATUS
+EFIAPI
+ToggleBootPath(VOID)
+{
+  EFI_STATUS Status = EFI_SUCCESS;
+  // Backup Current TPL
+  EFI_TPL CurrentTPL = gBS->RaiseTPL (TPL_HIGH_LEVEL);
+  // Reduce TPL to Application for further operations
+  gBS->RestoreTPL (TPL_APPLICATION);
+
+  BOOT_PATH CurrentBootPath = ReadBootPath();
+
+  // Toggle between Android and ESP
+  if (CurrentBootPath == BOOT_PATH_ANDROID) {
+    CurrentBootPath = BOOT_PATH_ESP;
+  } else {
+    CurrentBootPath = BOOT_PATH_ANDROID;
+  }
+
+  // Set the new boot path
+  Status = SetBootPath(CurrentBootPath);
+  if (EFI_ERROR(Status)) {
+    DEBUG((DEBUG_ERROR, "ToggleBootPath: Failed to set new boot path: %r\n", Status));
+    return Status;
+  }
+
+  DEBUG((DEBUG_INFO, "ToggleBootPath: Boot path toggled to %u\n", CurrentBootPath));
+
+  gBS->RaiseTPL (CurrentTPL);
+  return Status;
 }

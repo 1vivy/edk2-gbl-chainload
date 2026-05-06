@@ -77,6 +77,7 @@
 #include <Library/BootLinux.h>
 #include <Protocol/EFIVerifiedBoot.h>
 #include <Uefi.h>
+#include <Library/BootESP.h>
 
 STATIC OPTION_MENU_INFO gMenuInfo;
 
@@ -95,6 +96,13 @@ STATIC MENU_MSG_INFO mFastbootOptionTitle[] = {
      OPTION_ITEM,
      0,
      ESP},
+    {{"Toggle Primary Boot OS"},
+     BIG_FACTOR,
+     BGR_ORANGE,
+     BGR_BLACK,
+     OPTION_ITEM,
+     0,
+     BOOTPATH},
     {{"Restart bootloader"},
      BIG_FACTOR,
      BGR_RED,
@@ -201,6 +209,20 @@ STATIC MENU_MSG_INFO mFastbootCommonMsgInfo[] = {
     {{"DEVICE STATE - "},
      COMMON_FACTOR,
      BGR_RED,
+     BGR_BLACK,
+     COMMON,
+     0,
+     NOACTION},
+    {{"ESP PARTITION - "},
+     COMMON_FACTOR,
+     BGR_CYAN,
+     BGR_BLACK,
+     COMMON,
+     0,
+     NOACTION},
+    {{"PRIMARY BOOT OS - "},
+     COMMON_FACTOR,
+     BGR_CYAN,
      BGR_BLACK,
      COMMON,
      0,
@@ -343,7 +365,6 @@ FastbootMenuShowScreen (OPTION_MENU_INFO *OptionMenuInfo)
   CHAR8 StrTemp1[MAX_RSP_SIZE] = "";
   CHAR8 VersionTemp[MAX_VERSION_LEN] = "";
   UINT32 OptionTotal = ARRAY_SIZE (mFastbootOptionTitle);
-
   ZeroMem (&OptionMenuInfo->Info, sizeof (MENU_OPTION_ITEM_INFO));
 
   /* Only add alternate boot option when device is unbootable */
@@ -428,6 +449,38 @@ FastbootMenuShowScreen (OPTION_MENU_INFO *OptionMenuInfo)
             mFastbootCommonMsgInfo[i].Msg, sizeof (mFastbootCommonMsgInfo[i].Msg),
             IsUnlocked () ? "unlocked" : "locked",
             IsUnlocked () ? AsciiStrLen ("unlocked") : AsciiStrLen ("locked"));
+        break;
+      case 8:
+        /* Get ESP status */
+        if(!(EFI_ERROR(CheckBootAA64()))) {
+          AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+                      sizeof (mFastbootCommonMsgInfo[i].Msg), "found",
+                      AsciiStrLen ("found"));
+        }else{
+          AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+                      sizeof (mFastbootCommonMsgInfo[i].Msg), "not found",
+                      AsciiStrLen ("not found"));
+        }
+        break;
+      case 9:
+        /* Get boot path status */
+        switch (ReadBootPath ()) {
+          case BOOT_PATH_ANDROID:
+            AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+                          sizeof (mFastbootCommonMsgInfo[i].Msg), "Android",
+                          AsciiStrLen ("Android"));
+            break;
+          case BOOT_PATH_ESP:
+            AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+                          sizeof (mFastbootCommonMsgInfo[i].Msg), "Linux",
+                          AsciiStrLen ("Linux"));
+            break;
+          default:
+            AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+                          sizeof (mFastbootCommonMsgInfo[i].Msg), "Unknown",
+                          AsciiStrLen ("Unknown"));
+            break;
+        }
         break;
       }
     }
