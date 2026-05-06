@@ -4045,13 +4045,20 @@ Exit:
 }
 
 /* `oem boot_efi`: LoadImage + StartImage on the contents of the staging
- * buffer. Android `fastboot stage` is just `download:` on the wire, so the
- * payload already lives in mFlashDataBuffer (post-ExchangeFlashAndUsbDataBuf
- * swap). No new wire command needed.
+ * buffer. Android `fastboot stage` is just `download:` on the wire — the
+ * payload lands in mUsbDataBuffer (set by CmdDownload). The pointer swap
+ * + size copy that move it to mFlashDataBuffer/mFlashNumDataBytes happens
+ * in ExchangeFlashAndUsbDataBuf(), which CmdFlash calls at its top. We
+ * mirror that contract here.
  *
  * Caveat (documented discipline, not enforced in code): a `flash:` or
  * subsequent `download:` between `stage` and `oem boot_efi` will overwrite
  * the buffer. Don't interleave.
+ *
+ * Nested boot_efi: when the staged image itself calls FastbootInitialize
+ * a fresh transfer buffer is allocated for that nested fastboot session
+ * (see FastbootCmdsInit:2620), so loading an EFI from inside a loaded
+ * EFI is naturally supported.
  *
  * StartImage does not return on a successful boot — control transfers to
  * the staged image. If we get back here it's because the image returned
@@ -4063,6 +4070,12 @@ CmdOemBootEfi (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   EFI_STATUS Status;
   EFI_HANDLE ImageHandle = NULL;
   CHAR8 Resp[MAX_RSP_SIZE];
+
+  /* Swap mUsbDataBuffer↔mFlashDataBuffer and copy mNumDataBytes
+   * → mFlashNumDataBytes. Without this, mFlashNumDataBytes is still
+   * the initial buffer-capacity (~768 MB on canoe) and LoadImage gets
+   * a wildly wrong size. */
+  ExchangeFlashAndUsbDataBuf ();
 
   if (mFlashDataBuffer == NULL || mFlashNumDataBytes == 0) {
     FastbootFail ("no staged image — run `fastboot stage <file>` first");
