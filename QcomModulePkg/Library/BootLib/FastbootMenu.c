@@ -227,6 +227,21 @@ STATIC MENU_MSG_INFO mFastbootCommonMsgInfo[] = {
      COMMON,
      0,
      NOACTION},
+    /* gbl-chainload identifier — compile-time-concatenated so no switch
+     * case is needed (unmatched indices in the dispatcher's switch fall
+     * through with the literal in place). GBL_CHAINLOAD_VERSION is
+     * expected to come from -D at build time; defensive default below
+     * keeps the fork buildable standalone. */
+#ifndef GBL_CHAINLOAD_VERSION
+#define GBL_CHAINLOAD_VERSION "unknown"
+#endif
+    {{"gbl-chainload " GBL_CHAINLOAD_VERSION " | built " __DATE__ " " __TIME__},
+     COMMON_FACTOR,
+     BGR_GREEN,
+     BGR_BLACK,
+     COMMON,
+     0,
+     NOACTION},
 };
 
 STATIC EFI_STATUS CleanMessage (UINT32 MessageLen, UINT32 Location)
