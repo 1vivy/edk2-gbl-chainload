@@ -2559,6 +2559,54 @@ STATIC VOID GetBufferSize (UINT64 *MaxBufferSize, UINT64 *MinBufferSize)
   }
 }
 
+/* ---- QcomWDog (Qualcomm hardware watchdog) helpers ---------------------
+ *
+ * EFIQcomWDog.h isn't carried in this fork's headers - the protocol is
+ * exposed at runtime by the XBL-loaded DXE driver. Layout matches
+ * QcomSdkPkg/Include/Protocol/EFIQcomWDog.h. Used by FastbootCmdsInit
+ * to silence both the QcomWDog itself AND OnePlus Phoenix's periodic
+ * re-arming of it (Phoenix is OEM code, no source visibility, so we
+ * defensively pet from our own 5s timer rather than trust Disable). */
+typedef EFI_STATUS (EFIAPI *EFI_QCOM_WDOG_ENABLE_FN) (VOID);
+typedef EFI_STATUS (EFIAPI *EFI_QCOM_WDOG_DISABLE_FN) (VOID);
+typedef EFI_STATUS (EFIAPI *EFI_QCOM_WDOG_SET_BITE_TIMEOUT_FN) (
+                              IN UINT32 TimeOutSec);
+typedef VOID       (EFIAPI *EFI_QCOM_WDOG_FORCE_PET_FN) (VOID);
+typedef EFI_STATUS (EFIAPI *EFI_QCOM_WDOG_FORCE_BITE_FN) (VOID);
+typedef EFI_STATUS (EFIAPI *EFI_QCOM_WDOG_SET_PET_PERIOD_FN) (
+                              IN UINT32 PeroidSec);
+
+typedef struct {
+  UINT64                              Version;
+  EFI_QCOM_WDOG_ENABLE_FN             Enable;
+  EFI_QCOM_WDOG_DISABLE_FN            Disable;
+  EFI_QCOM_WDOG_SET_BITE_TIMEOUT_FN   SetBiteTimeout;
+  EFI_QCOM_WDOG_FORCE_PET_FN          ForceWDogPet;
+  EFI_QCOM_WDOG_FORCE_BITE_FN         ForceWDogBite;
+  EFI_QCOM_WDOG_SET_PET_PERIOD_FN     SetPetTimerPeriod;
+} EFI_QCOM_WATCHDOG_PROTOCOL;
+
+STATIC EFI_GUID                    gQcomWdogGuid = {
+  0x6f8b0fa0, 0x034f, 0x47a4,
+  { 0x8c, 0x7a, 0xbc, 0xec, 0x55, 0xb4, 0x1c, 0x64 }
+};
+
+/* Reachable from the timer callback; latched by FastbootCmdsInit. */
+STATIC EFI_QCOM_WATCHDOG_PROTOCOL *gFastbootWdog     = NULL;
+STATIC EFI_EVENT                   gFastbootWdogPet  = NULL;
+
+/* Timer-event callback: pets the QcomWDog every 5s. */
+STATIC VOID EFIAPI
+FastbootWdogPetCallback (
+  IN EFI_EVENT  Event,
+  IN VOID      *Context
+  )
+{
+  if (gFastbootWdog != NULL && gFastbootWdog->ForceWDogPet != NULL) {
+    gFastbootWdog->ForceWDogPet ();
+  }
+}
+
 EFI_STATUS
 FastbootCmdsInit (VOID)
 {
@@ -2582,50 +2630,66 @@ FastbootCmdsInit (VOID)
   }
 
   /* The standard SetWatchdogTimer above only stops the EDK2 / ARM
-   * Generic Watchdog. Qualcomm devices also run a separate hardware
-   * watchdog (QcomWDogDxe) that bites on its own ~30s timer regardless
-   * of the EDK2 timer state. Without this disable the device resets
-   * mid-session whenever fastboot sits idle. EFIQcomWDog.h isn't in
-   * this fork's headers; declare the protocol surface inline to match
-   * QcomSdkPkg/Include/Protocol/EFIQcomWDog.h. */
+   * Generic Watchdog. Qualcomm SoCs also run a hardware watchdog
+   * (QcomWDogDxe) and on canoe OnePlus Phoenix periodically re-arms
+   * it from an OEM thread we have no source for. Triple-disable below
+   * (Disable + SetBiteTimeout(0) + periodic 5s pet) is defensive
+   * depth: if the first two don't fully take, the periodic pet keeps
+   * the bite timer fed indefinitely. */
   {
-    typedef EFI_STATUS (EFIAPI *EFI_QCOM_WDOG_ENABLE_FN) (VOID);
-    typedef EFI_STATUS (EFIAPI *EFI_QCOM_WDOG_DISABLE_FN) (VOID);
-    typedef EFI_STATUS (EFIAPI *EFI_QCOM_WDOG_SET_BITE_TIMEOUT_FN) (
-                                  IN UINT32 TimeOutSec);
-    typedef VOID       (EFIAPI *EFI_QCOM_WDOG_FORCE_PET_FN) (VOID);
-    typedef EFI_STATUS (EFIAPI *EFI_QCOM_WDOG_FORCE_BITE_FN) (VOID);
-    typedef EFI_STATUS (EFIAPI *EFI_QCOM_WDOG_SET_PET_PERIOD_FN) (
-                                  IN UINT32 PeroidSec);
-
-    typedef struct {
-      UINT64                              Version;
-      EFI_QCOM_WDOG_ENABLE_FN             Enable;
-      EFI_QCOM_WDOG_DISABLE_FN            Disable;
-      EFI_QCOM_WDOG_SET_BITE_TIMEOUT_FN   SetBiteTimeout;
-      EFI_QCOM_WDOG_FORCE_PET_FN          ForceWDogPet;
-      EFI_QCOM_WDOG_FORCE_BITE_FN         ForceWDogBite;
-      EFI_QCOM_WDOG_SET_PET_PERIOD_FN     SetPetTimerPeriod;
-    } EFI_QCOM_WATCHDOG_PROTOCOL;
-
-    STATIC EFI_GUID QcomWdogGuid = {
-      0x6f8b0fa0, 0x034f, 0x47a4,
-      { 0x8c, 0x7a, 0xbc, 0xec, 0x55, 0xb4, 0x1c, 0x64 }
-    };
-
-    EFI_QCOM_WATCHDOG_PROTOCOL *Wdog = NULL;
-    EFI_STATUS WdogStatus = gBS->LocateProtocol (&QcomWdogGuid, NULL,
-                                                 (VOID **)&Wdog);
-    if (EFI_ERROR (WdogStatus) || Wdog == NULL) {
+    EFI_STATUS WdogStatus = gBS->LocateProtocol (&gQcomWdogGuid, NULL,
+                                                 (VOID **)&gFastbootWdog);
+    if (EFI_ERROR (WdogStatus) || gFastbootWdog == NULL) {
       DEBUG ((EFI_D_WARN,
               "Fastboot: QcomWDog protocol not found: %r\n", WdogStatus));
-    } else if (Wdog->Disable == NULL) {
-      DEBUG ((EFI_D_WARN, "Fastboot: QcomWDog->Disable slot is NULL\n"));
+      gFastbootWdog = NULL;
     } else {
-      WdogStatus = Wdog->Disable ();
       DEBUG ((EFI_D_INFO,
-              "Fastboot: QcomWDog->Disable() (Ver=0x%lx) returned %r\n",
-              Wdog->Version, WdogStatus));
+              "Fastboot: QcomWDog Ver=0x%lx, applying triple-disable\n",
+              gFastbootWdog->Version));
+
+      /* (1) Disable: header says it stops watchdog and pet timer. */
+      if (gFastbootWdog->Disable != NULL) {
+        WdogStatus = gFastbootWdog->Disable ();
+        DEBUG ((EFI_D_INFO,
+                "Fastboot: QcomWDog->Disable() %r\n", WdogStatus));
+      }
+
+      /* (2) SetBiteTimeout(0): header explicitly says 0 cancels the
+       * bite timer. Belt-and-suspenders with Disable(), since on canoe
+       * Disable() returns Success but the device still resets ~30s
+       * later -- suggests the bite countdown isn't actually halted. */
+      if (gFastbootWdog->SetBiteTimeout != NULL) {
+        WdogStatus = gFastbootWdog->SetBiteTimeout (0);
+        DEBUG ((EFI_D_INFO,
+                "Fastboot: QcomWDog->SetBiteTimeout(0) %r\n", WdogStatus));
+      }
+
+      /* (3) Periodic pet: even if (1) and (2) don't fully take, OnePlus
+       * Phoenix re-arms the watchdog from its own thread. Our 5s pet
+       * wins as long as it fires faster than the bite timer. Event
+       * leaks at fastboot exit but fastboot never EBSes. */
+      if (gFastbootWdog->ForceWDogPet != NULL) {
+        WdogStatus = gBS->CreateEvent (
+                            EVT_TIMER | EVT_NOTIFY_SIGNAL,
+                            TPL_CALLBACK,
+                            FastbootWdogPetCallback,
+                            NULL,
+                            &gFastbootWdogPet
+                            );
+        if (!EFI_ERROR (WdogStatus)) {
+          /* 5s in 100ns units. */
+          WdogStatus = gBS->SetTimer (gFastbootWdogPet, TimerPeriodic,
+                                      50000000ULL);
+          DEBUG ((EFI_D_INFO,
+                  "Fastboot: QcomWDog 5s pet event armed: %r\n",
+                  WdogStatus));
+        } else {
+          DEBUG ((EFI_D_WARN,
+                  "Fastboot: QcomWDog CreateEvent failed: %r\n",
+                  WdogStatus));
+        }
+      }
     }
   }
 
