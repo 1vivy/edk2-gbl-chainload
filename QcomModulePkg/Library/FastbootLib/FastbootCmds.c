@@ -2595,6 +2595,37 @@ STATIC EFI_GUID                    gQcomWdogGuid = {
 STATIC EFI_QCOM_WATCHDOG_PROTOCOL *gFastbootWdog     = NULL;
 STATIC EFI_EVENT                   gFastbootWdogPet  = NULL;
 
+/* Original gBS->SetWatchdogTimer pointer + our clamp. Installed by
+ * FastbootCmdsInit so Phoenix's "Phoenix:Set uefi watchdog time is 60"
+ * call (and any other re-arm from OEM threads) becomes a no-op for the
+ * timeout dimension while still letting the boot-services table report
+ * EFI_SUCCESS. Without this, Phoenix sets a 60s timeout AFTER our
+ * one-shot disable and the device resets out of fastboot at 60s. */
+typedef EFI_STATUS (EFIAPI *EFI_SET_WATCHDOG_TIMER_FN) (
+                              IN UINTN     Timeout,
+                              IN UINT64    WatchdogCode,
+                              IN UINTN     DataSize,
+                              IN CHAR16   *WatchdogData OPTIONAL);
+
+STATIC EFI_SET_WATCHDOG_TIMER_FN gOriginalSetWatchdogTimer = NULL;
+
+STATIC EFI_STATUS EFIAPI
+FastbootWdogTimerClamp (
+  IN UINTN    Timeout,
+  IN UINT64   WatchdogCode,
+  IN UINTN    DataSize,
+  IN CHAR16  *WatchdogData OPTIONAL
+  )
+{
+  /* Force timeout=0 (= disabled) regardless of caller. Drop the
+   * WatchdogData payload too — non-zero callers tend to pass strings
+   * we don't care about. */
+  if (gOriginalSetWatchdogTimer != NULL) {
+    return gOriginalSetWatchdogTimer (0, WatchdogCode, 0, NULL);
+  }
+  return EFI_SUCCESS;
+}
+
 /* Timer-event callback: pets the QcomWDog every 5s. */
 STATIC VOID EFIAPI
 FastbootWdogPetCallback (
@@ -2622,7 +2653,20 @@ FastbootCmdsInit (VOID)
 
   DEBUG ((EFI_D_INFO, "Fastboot: Initializing...\n"));
 
-  /* Disable watchdog */
+  /* Hook gBS->SetWatchdogTimer FIRST so Phoenix's later 60s re-arm
+   * gets clamped to 0. Save the original pointer, swap the slot, then
+   * make a normal SetWatchdogTimer(0,...) call which now goes through
+   * our clamp — confirms the swap took and disables the timer in one
+   * step. */
+  if (gBS->SetWatchdogTimer != FastbootWdogTimerClamp) {
+    gOriginalSetWatchdogTimer = gBS->SetWatchdogTimer;
+    gBS->SetWatchdogTimer     = FastbootWdogTimerClamp;
+    DEBUG ((EFI_D_INFO,
+            "Fastboot: SetWatchdogTimer hooked (orig=%p clamp=%p)\n",
+            gOriginalSetWatchdogTimer, FastbootWdogTimerClamp));
+  }
+
+  /* Disable watchdog (now routed through our clamp). */
   Status = gBS->SetWatchdogTimer (0, 0x10000, 0, NULL);
   if (EFI_ERROR (Status)) {
     DEBUG ((EFI_D_ERROR, "Fastboot: Couldn't disable watchdog timer: %r\n",
