@@ -579,25 +579,42 @@ GetPartitionHasSlot (CHAR16 *PartitionName,
                      UINT32 SlotSuffixMaxSize)
 {
   INT32 Index = INVALID_PTN;
+  INT32 SlotIndex = INVALID_PTN;
   BOOLEAN HasSlot = FALSE;
   Slot CurrentSlot;
+  CHAR16 Candidate[MAX_GPT_NAME_SIZE];
+  UINTN NameLen;
+
+  /* Explicitly suffixed names are already slot-qualified. Do this before
+   * probing the table so an absent/misspelled `foo_a` never mutates into
+   * `foo_a_a`. Match only terminal suffixes; names like `vendor_boot`
+   * and `init_boot` contain `_b` but are not already slot-qualified. */
+  NameLen = StrLen (PartitionName);
+  if (NameLen >= 2 &&
+      (!StrCmp (PartitionName + NameLen - 2, (CONST CHAR16 *)L"_a") ||
+       !StrCmp (PartitionName + NameLen - 2, (CONST CHAR16 *)L"_b"))) {
+    StrnCpyS (SlotSuffix, SlotSuffixMaxSize,
+              (PartitionName + (StrLen (PartitionName) - 2)), 2);
+    return TRUE;
+  }
 
   Index = GetPartitionIndex (PartitionName);
   if (Index == INVALID_PTN) {
     CurrentSlot = GetCurrentSlotSuffix ();
-    StrnCpyS (SlotSuffix, SlotSuffixMaxSize, CurrentSlot.Suffix,
+    StrnCpyS (Candidate, ARRAY_SIZE (Candidate), PartitionName,
+              StrLen (PartitionName));
+    StrnCatS (Candidate, ARRAY_SIZE (Candidate), CurrentSlot.Suffix,
               StrLen (CurrentSlot.Suffix));
-    StrnCatS (PartitionName, PnameMaxSize, CurrentSlot.Suffix,
-              StrLen (CurrentSlot.Suffix));
-    HasSlot = TRUE;
-  } else {
-    /*Check for _a or _b slots, if available then copy to SlotSuffix Array*/
-    if (StrStr (PartitionName, (CONST CHAR16 *)L"_a") ||
-        StrStr (PartitionName, (CONST CHAR16 *)L"_b")) {
-      StrnCpyS (SlotSuffix, SlotSuffixMaxSize,
-                (PartitionName + (StrLen (PartitionName) - 2)), 2);
+
+    SlotIndex = GetPartitionIndex (Candidate);
+    if (SlotIndex != INVALID_PTN) {
+      StrnCpyS (SlotSuffix, SlotSuffixMaxSize, CurrentSlot.Suffix,
+                StrLen (CurrentSlot.Suffix));
+      StrnCpyS (PartitionName, PnameMaxSize, Candidate, StrLen (Candidate));
       HasSlot = TRUE;
     }
+  } else {
+    HasSlot = FALSE;
   }
   return HasSlot;
 }
@@ -2868,6 +2885,62 @@ CmdRebootFastboot (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 }
 
 STATIC VOID
+CmdOemBcbRecovery (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  EFI_STATUS Status;
+
+  Status = WriteRecoveryMessage (RECOVERY_BOOT_RECOVERY);
+  if (EFI_ERROR (Status)) {
+    FastbootFail ("Failed to set BCB recovery command");
+    return;
+  }
+
+  FastbootOkay ("BCB command=boot-recovery");
+}
+
+STATIC VOID
+CmdOemBcbFastboot (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  EFI_STATUS Status;
+
+  Status = WriteRecoveryMessage (RECOVERY_BOOT_FASTBOOT);
+  if (EFI_ERROR (Status)) {
+    FastbootFail ("Failed to set BCB fastboot command");
+    return;
+  }
+
+  FastbootOkay ("BCB command=boot-fastboot");
+}
+
+STATIC VOID
+CmdOemBcbClear (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  EFI_STATUS             Status;
+  EFI_GUID               Ptype = gEfiMiscPartitionGuid;
+  MemCardType            CardType;
+  struct RecoveryMessage Msg;
+
+  ZeroMem (&Msg, sizeof (Msg));
+
+  CardType = CheckRootDeviceType ();
+  if (CardType == NAND) {
+    Status = GetNandMiscPartiGuid (&Ptype);
+    if (EFI_ERROR (Status)) {
+      FastbootFail ("Failed to locate NAND misc partition");
+      return;
+    }
+  }
+
+  Status = WriteToPartition (&Ptype, &Msg, sizeof (Msg));
+  if (EFI_ERROR (Status)) {
+    FastbootFail ("Failed to clear BCB command");
+    return;
+  }
+
+  FastbootOkay ("BCB cleared");
+}
+
+STATIC VOID
 CmdUpdateSnapshot (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 {
   CHAR8 *Command = NULL;
@@ -4343,6 +4416,9 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
       {"download:", CmdDownload},
       {"oem audio-framework", CmdOemAudioFrameWork},
       {"oem boot-efi", CmdOemBootEfi},
+      {"oem bcb-recovery", CmdOemBcbRecovery},
+      {"oem bcb-fastboot", CmdOemBcbFastboot},
+      {"oem bcb-clear", CmdOemBcbClear},
   };
 
   /* Register the commands only for non-user builds */

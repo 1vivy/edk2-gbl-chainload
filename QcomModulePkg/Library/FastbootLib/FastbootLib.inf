@@ -173,6 +173,7 @@
   gEfiUfsLU7Guid
   gEfiBootImgPartitionGuid
   gEfiRecoveryImgPartitionGuid
+  gEfiMiscPartitionGuid
   gQcomTokenSpaceGuid
   gBlockIoRefreshGuid
   gEfiNvme0Guid
