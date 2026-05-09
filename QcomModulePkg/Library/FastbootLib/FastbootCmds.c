@@ -78,7 +78,7 @@ found at
 #include <Protocol/BlockIo.h>
 #include <Protocol/SimpleFileSystem.h>
 
-#if defined (AUTO_DEBUG_MODE) || defined (MODE_DEBUG) || defined (MODE_TEMPLATE) || defined (FAKELOCKED)
+#if defined (AUTO_DEBUG_MODE) || defined (MODE_DEBUG) || defined (MODE_TEMPLATE) || defined (FAKELOCKED) || defined (FAKELOCKED_DEBUG)
 #define GBL_EXPERIMENTAL_FASTBOOT_CMDS 1
 #endif
 #if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
