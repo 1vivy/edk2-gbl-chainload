@@ -81,23 +81,37 @@
 
 STATIC OPTION_MENU_INFO gMenuInfo;
 
-#if defined (AUTO_DEBUG_MODE)
-#define GBL_CHAINLOAD_MODE "AUTO_DEBUG_MODE"
-#elif defined (MODE_DEBUG)
-#define GBL_CHAINLOAD_MODE "MODE_DEBUG"
-#elif defined (MINIMAL)
-#define GBL_CHAINLOAD_MODE "MINIMAL"
-#elif defined (MODE_TEMPLATE)
-#define GBL_CHAINLOAD_MODE "MODE_TEMPLATE"
-#elif defined (FAKELOCKED)
-#define GBL_CHAINLOAD_MODE "FAKELOCKED"
-#elif defined (FAKELOCKED_DEBUG)
-#define GBL_CHAINLOAD_MODE "FAKELOCKED_DEBUG"
-#elif defined (MODE_1)
-#define GBL_CHAINLOAD_MODE "MODE_1"
-#else
-#define GBL_CHAINLOAD_MODE "UNKNOWN_MODE"
+#ifndef GBL_MODE
+# define GBL_MODE 0
 #endif
+
+#if (GBL_MODE == 1)
+# define GBL_CHAINLOAD_MODE  "mode-1"
+#elif (GBL_MODE == 2)
+# define GBL_CHAINLOAD_MODE  "mode-2"
+#elif (GBL_MODE == 3)
+# define GBL_CHAINLOAD_MODE  "mode-3"
+#else
+# define GBL_CHAINLOAD_MODE  "unknown-mode"
+#endif
+
+#ifndef GBL_AUTO
+# define GBL_AUTO 0
+#endif
+#ifndef GBL_DEBUG
+# define GBL_DEBUG 0
+#endif
+#ifndef GBL_VERBOSE
+# define GBL_VERBOSE 0
+#endif
+
+#define _GBL_STR(x)  #x
+#define GBL_STR(x)   _GBL_STR(x)
+
+#define GBL_CHAINLOAD_STATE \
+  "STATE - auto=" GBL_STR(GBL_AUTO) \
+  " debug=" GBL_STR(GBL_DEBUG) \
+  " verbose=" GBL_STR(GBL_VERBOSE)
 
 STATIC MENU_MSG_INFO mFastbootOptionTitle[] = {
     {{"START"},
@@ -114,13 +128,6 @@ STATIC MENU_MSG_INFO mFastbootOptionTitle[] = {
      OPTION_ITEM,
      0,
      ESP},
-    {{"Toggle Primary Boot OS"},
-     BIG_FACTOR,
-     BGR_ORANGE,
-     BGR_BLACK,
-     OPTION_ITEM,
-     0,
-     BOOTPATH},
     {{"Restart bootloader"},
      BIG_FACTOR,
      BGR_RED,
@@ -260,6 +267,13 @@ STATIC MENU_MSG_INFO mFastbootCommonMsgInfo[] = {
      0,
      NOACTION},
     {{"BUILD - " __DATE__ " " __TIME__},
+     COMMON_FACTOR,
+     BGR_GREEN,
+     BGR_BLACK,
+     COMMON,
+     0,
+     NOACTION},
+    {{GBL_CHAINLOAD_STATE},
      COMMON_FACTOR,
      BGR_GREEN,
      BGR_BLACK,

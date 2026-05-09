@@ -210,12 +210,6 @@ UpdateDeviceStatus (OPTION_MENU_INFO *MsgInfo, INTN Reason)
     DEBUG ((EFI_D_WARN,
           "Boot to ESP failed, please check the ESP partition existence\n"));
     break;
-  case BOOTPATH:
-    Status = ToggleBootPath ();
-    if (Status != EFI_SUCCESS)
-      DEBUG ((EFI_D_ERROR, "Failed to toggle boot path: %r\n", Status));
-    RebootDevice (FASTBOOT_MODE);
-    break;
   }
 }
 
