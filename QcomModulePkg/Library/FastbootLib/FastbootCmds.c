@@ -76,6 +76,14 @@ found at
 #include <Guid/EventGroup.h>
 
 #include <Protocol/BlockIo.h>
+#include <Protocol/SimpleFileSystem.h>
+
+#if defined (AUTO_DEBUG_MODE) || defined (MODE_DEBUG)
+#define GBL_EXPERIMENTAL_FASTBOOT_CMDS 1
+#endif
+#if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
+EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
+#endif
 #include <Protocol/DiskIo.h>
 #include <Protocol/EFIUsbDevice.h>
 #include <Protocol/EFIUbiFlasher.h>
@@ -2850,17 +2858,10 @@ CmdReboot (IN CONST CHAR8 *arg, IN VOID *data, IN UINT32 sz)
 STATIC VOID
 CmdRebootRecovery (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 {
-  EFI_STATUS Status = EFI_SUCCESS;
-
-  Status = WriteRecoveryMessage (RECOVERY_BOOT_RECOVERY);
-  if (Status != EFI_SUCCESS) {
-    FastbootFail ("Failed to reboot to recovery mode");
-    return;
-  }
   DEBUG ((EFI_D_INFO, "rebooting the device to recovery\n"));
   FastbootOkay ("");
 
-  RebootDevice (NORMAL_MODE);
+  RebootDevice (RECOVERY_MODE);
 
   // Shouldn't get here
   FastbootFail ("Failed to reboot");
@@ -4341,6 +4342,85 @@ CmdOemBootEfi (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   FastbootFail (Resp);
 }
 
+#if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
+
+/* `oem escape`: leave AUTO_DEBUG FastbootLib and continue into the patched
+ * stock ABL path. This is intentionally BCB-free: host can request a recovery
+ * boot using `fastboot reboot recovery`, wait for AUTO_DEBUG's default
+ * FastbootLib to reappear, then send `fastboot oem escape`. CmdRebootRecovery
+ * uses a recovery reset reason instead of BCB, so the reason is preserved for
+ * stock ABL while GBL itself avoids persistent BCB state. */
+STATIC VOID
+CmdOemEscape (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  EFI_STATUS Status;
+  CHAR8 Resp[MAX_RSP_SIZE];
+
+  FastbootInfo ("escaping to patched ABL");
+  Status = BootFlowChainLoad ();
+
+  AsciiSPrint (Resp, sizeof (Resp),
+               "escape returned %r (falling back to fastboot)", Status);
+  FastbootFail (Resp);
+}
+
+#define GBL_RPMB_UNLOCK_CONFIRM " CONFIRM_WIPE"
+
+/* Dangerous debug-only direct DevInfo state toggle. This intentionally bypasses
+ * the normal fastboot display/FRP confirmation path so we can run locked-state
+ * boot experiments and then recover from our own FastbootLib. It still uses the
+ * platform SetDeviceUnlockValue() primitive, so it also calls ResetDeviceState()
+ * and writes the recovery wipe-data command into misc. Never expose outside
+ * debug/testbench builds. */
+STATIC VOID
+CmdOemRpmbSetUnlockState (
+  IN CONST CHAR8 *Arg,
+  IN BOOLEAN State
+  )
+{
+  EFI_STATUS Status;
+  CHAR8 Resp[MAX_RSP_SIZE];
+
+  if (AsciiStrCmp (Arg, GBL_RPMB_UNLOCK_CONFIRM) != 0) {
+    FastbootInfo ("DANGEROUS: ABL NOT PATCHED FOR THIS - ONLY USE IN UNLOCK");
+    FastbootInfo ("SetDeviceUnlockValue requests data wipe via misc");
+    AsciiSPrint (Resp, sizeof (Resp), "rerun with:%a",
+                 GBL_RPMB_UNLOCK_CONFIRM);
+    FastbootFail (Resp);
+    return;
+  }
+
+  FastbootInfo ("DANGEROUS: direct RPMB DevInfo unlock-state write");
+  FastbootInfo ("ABL NOT PATCHED FOR THIS - ONLY USE IN UNLOCK");
+  FastbootInfo ("SetDeviceUnlockValue also requests data wipe via misc");
+
+  Status = SetDeviceUnlockValue (UNLOCK, State);
+  if (EFI_ERROR (Status)) {
+    AsciiSPrint (Resp, sizeof (Resp), "rpmb-%a failed: %r",
+                 State ? "unlock" : "lock", Status);
+    FastbootFail (Resp);
+    return;
+  }
+
+  AsciiSPrint (Resp, sizeof (Resp), "rpmb-%a requested; reboot required",
+               State ? "unlock" : "lock");
+  FastbootOkay (Resp);
+}
+
+STATIC VOID
+CmdOemRpmbLock (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  CmdOemRpmbSetUnlockState (Arg, FALSE);
+}
+
+STATIC VOID
+CmdOemRpmbUnlock (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  CmdOemRpmbSetUnlockState (Arg, TRUE);
+}
+
+#endif /* GBL_EXPERIMENTAL_FASTBOOT_CMDS */
+
 /* Registers all Stock commands, Publishes all stock variables
  * and partitiion sizes. base and size are the respective parameters
  * to the Fastboot Buffer used to store the downloaded image for flashing
@@ -4415,6 +4495,11 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
       {"getvar:", CmdGetVar},
       {"download:", CmdDownload},
       {"oem audio-framework", CmdOemAudioFrameWork},
+#if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
+      {"oem escape", CmdOemEscape},
+      {"oem rpmb-lock", CmdOemRpmbLock},
+      {"oem rpmb-unlock", CmdOemRpmbUnlock},
+#endif
       {"oem boot-efi", CmdOemBootEfi},
       {"oem bcb-recovery", CmdOemBcbRecovery},
       {"oem bcb-fastboot", CmdOemBcbFastboot},

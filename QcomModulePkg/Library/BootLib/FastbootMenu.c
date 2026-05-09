@@ -81,6 +81,18 @@
 
 STATIC OPTION_MENU_INFO gMenuInfo;
 
+#if defined (AUTO_DEBUG_MODE)
+#define GBL_CHAINLOAD_MODE "AUTO_DEBUG_MODE"
+#elif defined (MODE_DEBUG)
+#define GBL_CHAINLOAD_MODE "MODE_DEBUG"
+#elif defined (MINIMAL)
+#define GBL_CHAINLOAD_MODE "MINIMAL"
+#elif defined (MODE_1)
+#define GBL_CHAINLOAD_MODE "MODE_1"
+#else
+#define GBL_CHAINLOAD_MODE "UNKNOWN_MODE"
+#endif
+
 STATIC MENU_MSG_INFO mFastbootOptionTitle[] = {
     {{"START"},
      BIG_FACTOR,
@@ -227,15 +239,21 @@ STATIC MENU_MSG_INFO mFastbootCommonMsgInfo[] = {
      COMMON,
      0,
      NOACTION},
-    /* gbl-chainload identifier — compile-time-concatenated so no switch
-     * case is needed (unmatched indices in the dispatcher's switch fall
-     * through with the literal in place). GBL_CHAINLOAD_VERSION is
-     * expected to come from -D at build time; defensive default below
-     * keeps the fork buildable standalone. */
-#ifndef GBL_CHAINLOAD_VERSION
-#define GBL_CHAINLOAD_VERSION "unknown"
-#endif
-    {{"gbl-chainload " GBL_CHAINLOAD_VERSION " | built " __DATE__ " " __TIME__},
+    {{"gbl-chainload"},
+     COMMON_FACTOR,
+     BGR_GREEN,
+     BGR_BLACK,
+     COMMON,
+     0,
+     NOACTION},
+    {{"MODE - " GBL_CHAINLOAD_MODE},
+     COMMON_FACTOR,
+     BGR_GREEN,
+     BGR_BLACK,
+     COMMON,
+     0,
+     NOACTION},
+    {{"BUILD - " __DATE__ " " __TIME__},
      COMMON_FACTOR,
      BGR_GREEN,
      BGR_BLACK,
