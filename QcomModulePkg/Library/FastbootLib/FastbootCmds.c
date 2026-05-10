@@ -4480,7 +4480,7 @@ STATIC VOID
 CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 {
   EFI_STATUS              Status;
-  CHAR8                   Resp[MAX_RSP_SIZE];
+  CHAR8                   Resp[256];
   CHAR8                   PartName[MAX_GPT_NAME_SIZE];  /* ascii root name  */
   CONST CHAR8            *ArgPtr;
   BOOLEAN                 DoCommit = FALSE;
@@ -4500,13 +4500,12 @@ CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   UINT64                  BlockSize;
   UINT64                  ReadLba;
   UINT64                  ReadBytes;
-  UINT32                  ReadBlocks;
 
   /* ---- exchange staging buffer (mirrors CmdFlash / CmdOemBootEfi) ---- */
   ExchangeFlashAndUsbDataBuf ();
 
   if (mFlashDataBuffer == NULL || mFlashNumDataBytes == 0) {
-    FastbootFail ("no staged image — run `fastboot stage <file>` first");
+    FastbootFail ("no staged image -- run `fastboot stage <file>` first");
     return;
   }
 
@@ -4563,7 +4562,6 @@ CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   /* ---- read the entire on-disk partition ---- */
   BlockSize   = BlockIo->Media->BlockSize;
   ReadBytes   = (PartSize + BlockSize - 1) & ~(BlockSize - 1); /* round up */
-  ReadBlocks  = (UINT32)(ReadBytes / BlockSize);
 
   PartBuf = AllocatePool (ReadBytes);
   if (PartBuf == NULL) {
@@ -4609,7 +4607,7 @@ CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   /* ---- staged image must be at least as large as the target partition ---- */
   if (mFlashNumDataBytes < PartSize) {
     AsciiSPrint (Resp, sizeof (Resp),
-                 "staged image (%llu B) < partition size (%llu B) — too small",
+                 "staged image (%llu B) < partition size (%llu B) -- too small",
                  mFlashNumDataBytes, PartSize);
     FastbootFail (Resp);
     FreePool (PartBuf);
@@ -4659,7 +4657,7 @@ CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   /* ---- dry-run exit ---- */
   if (!DoCommit) {
     FreePool (PartBuf);
-    FastbootInfo ("DRY RUN — re-issue with 'commit' to write");
+    FastbootInfo ("DRY RUN -- re-issue with 'commit' to write");
     FastbootOkay ("");
     return;
   }
