@@ -5174,6 +5174,17 @@ GblGetVarVbmetaPartDescType (IN CONST CHAR8 *PartName,
   }
 }
 
+/**
+ * GblGetVarVbmetaPartExpected - emit the expected value for a vbmeta descriptor.
+ *
+ * Hash-type descriptor:  emits the stored 32-byte hash digest as 64 hex chars.
+ * Chain-type descriptor: emits a SHA-256 fingerprint of the chain pubkey bytes
+ *                        as 64 hex chars (NOT the raw pubkey).  The raw pubkey
+ *                        (~1 KB → ~2 KB hex → ~36 INFO chunks) saturated the
+ *                        USB transfer pool on canoe and wedged fastboot.
+ *
+ * Both cases fit in 2 INFO chunks, matching the vbmeta:digest output size.
+ */
 STATIC VOID
 GblGetVarVbmetaPartExpected (IN CONST CHAR8 *PartName)
 {
@@ -5205,18 +5216,21 @@ GblGetVarVbmetaPartExpected (IN CONST CHAR8 *PartName)
     FreePool (VbmBuf);
     GblFastbootRespondLong (Long);
   } else if (Type == GblPartDescChain && PubKey != NULL && PubKeyLen > 0) {
-    /* Pubkeys can be up to 1024 bytes (8192-bit RSA) = 2048 hex chars + NUL */
-    UINTN  HexLen = (UINTN)PubKeyLen * 2 + 1;
-    CHAR8 *Long   = AllocatePool (HexLen);
-    if (Long == NULL) {
-      FreePool (VbmBuf);
-      FastbootOkay ("error");
-      return;
-    }
-    GblVbmetaHexDump (PubKey, PubKeyLen, Long, HexLen);
+    /* Fingerprint the pubkey via SHA-256 to avoid a ~2KB hex dump that
+     * saturates the USB transfer pool on canoe and wedges fastboot.
+     * Output: 64 hex chars (32-byte digest), same as vbmeta:digest. */
+    GBL_AvbSHA256Ctx Ctx;
+    UINT8            Fingerprint[GBL_AVB_SHA256_DIGEST_SIZE];
+    CHAR8            Long[GBL_VBMETA_HEX_LEN];
+    UINT8           *FpPtr;
+
+    avb_sha256_init   (&Ctx);
+    avb_sha256_update (&Ctx, PubKey, PubKeyLen);
+    FpPtr = avb_sha256_final (&Ctx);
+    CopyMem (Fingerprint, FpPtr, GBL_AVB_SHA256_DIGEST_SIZE);
+    GblVbmetaHexDump (Fingerprint, GBL_AVB_SHA256_DIGEST_SIZE, Long, sizeof (Long));
     FreePool (VbmBuf);
     GblFastbootRespondLong (Long);
-    FreePool (Long);
   } else {
     FreePool (VbmBuf);
     FastbootOkay ("n/a");
