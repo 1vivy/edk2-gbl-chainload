@@ -4676,7 +4676,6 @@ CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
     FastbootInfo ("DRY RUN -- re-issue with 'commit' to write");
     WaitForTransferComplete ();
     FastbootOkay ("");
-    WaitForTransferComplete ();
     return;
   }
 
@@ -4710,7 +4709,6 @@ CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
                "grafted %s: replaced last %llu bytes (vbmeta tail from stock)",
                ResolvedName, TailBytes);
   FastbootOkay (Resp);
-  WaitForTransferComplete ();
 }
 
 /* -------------------------------------------------------------------------
@@ -4790,7 +4788,6 @@ GblFastbootRespondLong (IN CONST CHAR8 *Value)
 {
   GblFastbootInfoLong (Value);
   FastbootOkay ("");
-  WaitForTransferComplete ();
 }
 
 /*
@@ -5657,7 +5654,6 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 
   FreePool (VbmBuf);
   FastbootOkay ("");
-  WaitForTransferComplete ();
 }
 
 #endif /* GBL_EXPERIMENTAL_FASTBOOT_CMDS */
