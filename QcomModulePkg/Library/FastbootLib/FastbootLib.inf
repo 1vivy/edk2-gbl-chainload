@@ -138,6 +138,7 @@
   MdePkg/MdePkg.dec
   MdeModulePkg/MdeModulePkg.dec
   QcomModulePkg/QcomModulePkg.dec
+  GblChainloadPkg/GblChainloadPkg.dec
 
 [LibraryClasses]
   UefiApplicationEntryPoint
@@ -148,6 +149,7 @@
   DebugLib
   UbsanLib
   CompilerIntrinsicsLib
+  AvbParseLib
 
 [Protocols]
   gEfiSimpleTextInProtocolGuid

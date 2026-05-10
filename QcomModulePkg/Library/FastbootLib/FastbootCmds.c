@@ -83,6 +83,7 @@ found at
 #endif
 #if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
 EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
+#include <Library/AvbParseLib.h>
 #endif
 #include <Protocol/DiskIo.h>
 #include <Protocol/EFIUsbDevice.h>
@@ -4419,6 +4420,282 @@ CmdOemRpmbUnlock (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   CmdOemRpmbSetUnlockState (Arg, TRUE);
 }
 
+/*
+ * LocatePartitionForGraft — resolve BlockIo + Handle for a bare partition
+ * root name (e.g. "recovery", "dtbo").  On a multi-slot device the active-slot
+ * suffixed name is tried first (_a or _b); the bare name is the fallback for
+ * partitions that have no A/B variants.
+ *
+ * On success *BlockIoOut and *HandleOut are set; the resolved CHAR16 name is
+ * written to ResolvedName (caller provides MAX_GPT_NAME_SIZE chars).
+ */
+STATIC EFI_STATUS
+LocatePartitionForGraft (
+  IN  CONST CHAR8          *RootNameAscii,
+  OUT EFI_BLOCK_IO_PROTOCOL **BlockIoOut,
+  OUT EFI_HANDLE           **HandleOut,
+  OUT CHAR16               *ResolvedName,
+  IN  UINT32               ResolvedNameSize
+  )
+{
+  EFI_STATUS   Status;
+  CHAR16       SlottedName[MAX_GPT_NAME_SIZE];
+  Slot         CurrentSlot;
+
+  /* Build slot-suffixed candidate */
+  AsciiStrToUnicodeStr (RootNameAscii, SlottedName);
+  CurrentSlot = GetCurrentSlotSuffix ();
+  StrnCatS (SlottedName, ARRAY_SIZE (SlottedName),
+            CurrentSlot.Suffix, StrLen (CurrentSlot.Suffix));
+
+  Status = PartitionGetInfo (SlottedName, BlockIoOut, HandleOut);
+  if (Status == EFI_SUCCESS && *BlockIoOut != NULL) {
+    StrnCpyS (ResolvedName, ResolvedNameSize, SlottedName, StrLen (SlottedName));
+    return EFI_SUCCESS;
+  }
+
+  /* Fallback: bare (non-A/B) name */
+  AsciiStrToUnicodeStr (RootNameAscii, ResolvedName);
+  Status = PartitionGetInfo (ResolvedName, BlockIoOut, HandleOut);
+  return Status;
+}
+
+/*
+ * `oem graft-and-flash <partition> [commit]`
+ *
+ * Takes the image already staged via `fastboot stage` (the same buffer that
+ * `flash:` uses), validates that the on-disk partition carries a stock AVB
+ * footer, and grafts the donor's vbmeta tail onto the staged image before
+ * writing it back.  Without the literal word "commit" the command is a
+ * dry-run: it validates and reports but does not write.
+ *
+ * Supported partitions: recovery, dtbo.
+ *
+ * Workflow:
+ *   fastboot stage <new-recovery.img>
+ *   fastboot oem graft-and-flash recovery          # dry-run
+ *   fastboot oem graft-and-flash recovery commit   # live write
+ */
+STATIC VOID
+CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  EFI_STATUS              Status;
+  CHAR8                   Resp[MAX_RSP_SIZE];
+  CHAR8                   PartName[MAX_GPT_NAME_SIZE];  /* ascii root name  */
+  CONST CHAR8            *ArgPtr;
+  BOOLEAN                 DoCommit = FALSE;
+
+  EFI_BLOCK_IO_PROTOCOL  *BlockIo = NULL;
+  EFI_HANDLE             *Handle  = NULL;
+  CHAR16                  ResolvedName[MAX_GPT_NAME_SIZE];
+
+  UINT64                  PartSize = 0;
+  UINT8                  *PartBuf  = NULL;
+
+  GBL_AVB_FOOTER          Footer;
+  GBL_AVB_VBMETA_HEADER   VbHdr;
+
+  UINT64                  TailOffset;
+  UINT64                  TailBytes;
+  UINT64                  BlockSize;
+  UINT64                  ReadLba;
+  UINT64                  ReadBytes;
+  UINT32                  ReadBlocks;
+
+  /* ---- exchange staging buffer (mirrors CmdFlash / CmdOemBootEfi) ---- */
+  ExchangeFlashAndUsbDataBuf ();
+
+  if (mFlashDataBuffer == NULL || mFlashNumDataBytes == 0) {
+    FastbootFail ("no staged image — run `fastboot stage <file>` first");
+    return;
+  }
+
+  /* ---- parse args: "<partition> [commit]" ---- */
+  /* Skip leading spaces */
+  ArgPtr = Arg;
+  while (*ArgPtr == ' ')
+    ArgPtr++;
+
+  /* Copy partition root name (up to first space or NUL) */
+  UINT32 NameLen = 0;
+  while (ArgPtr[NameLen] != '\0' && ArgPtr[NameLen] != ' ' &&
+         NameLen < sizeof (PartName) - 1)
+    NameLen++;
+
+  if (NameLen == 0) {
+    FastbootFail ("usage: oem graft-and-flash <partition> [commit]");
+    return;
+  }
+  AsciiStrnCpyS (PartName, sizeof (PartName), ArgPtr, NameLen);
+
+  /* Check for "commit" keyword after the partition name */
+  CONST CHAR8 *Rest = ArgPtr + NameLen;
+  while (*Rest == ' ')
+    Rest++;
+  if (AsciiStrCmp (Rest, "commit") == 0)
+    DoCommit = TRUE;
+
+  /* ---- validate partition is supported ---- */
+  if (AsciiStrCmp (PartName, "recovery") != 0 &&
+      AsciiStrCmp (PartName, "dtbo") != 0) {
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "unsupported partition '%a' (recovery|dtbo only)", PartName);
+    FastbootFail (Resp);
+    return;
+  }
+
+  /* ---- locate on-disk partition ---- */
+  Status = LocatePartitionForGraft (PartName, &BlockIo, &Handle,
+                                    ResolvedName, ARRAY_SIZE (ResolvedName));
+  if (EFI_ERROR (Status) || BlockIo == NULL) {
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "partition '%a' not found: %r", PartName, Status);
+    FastbootFail (Resp);
+    return;
+  }
+
+  PartSize = GetPartitionSize (BlockIo);
+  if (PartSize == 0) {
+    FastbootFail ("could not determine partition size");
+    return;
+  }
+
+  /* ---- read the entire on-disk partition ---- */
+  BlockSize   = BlockIo->Media->BlockSize;
+  ReadBytes   = (PartSize + BlockSize - 1) & ~(BlockSize - 1); /* round up */
+  ReadBlocks  = (UINT32)(ReadBytes / BlockSize);
+
+  PartBuf = AllocatePool (ReadBytes);
+  if (PartBuf == NULL) {
+    FastbootFail ("AllocatePool failed for partition read buffer");
+    return;
+  }
+
+  ReadLba = 0;
+  Status  = BlockIo->ReadBlocks (BlockIo, BlockIo->Media->MediaId,
+                                 ReadLba, ReadBytes, PartBuf);
+  if (EFI_ERROR (Status)) {
+    AsciiSPrint (Resp, sizeof (Resp), "ReadBlocks failed: %r", Status);
+    FastbootFail (Resp);
+    FreePool (PartBuf);
+    return;
+  }
+
+  /* ---- parse AVB footer (last GBL_AVB_FOOTER_SIZE bytes of partition) ---- */
+  Status = AvbParse_Footer (PartBuf, PartSize, &Footer);
+  if (EFI_ERROR (Status)) {
+    FastbootFail ("partition lacks stock vbmeta footer (not a stock image?)");
+    FreePool (PartBuf);
+    return;
+  }
+
+  /* ---- validate vbmeta header at footer-indicated offset ---- */
+  if (Footer.VbmetaOffset >= PartSize ||
+      Footer.VbmetaSize   == 0       ||
+      Footer.VbmetaOffset + Footer.VbmetaSize > PartSize) {
+    FastbootFail ("footer vbmeta_offset/size out of partition bounds");
+    FreePool (PartBuf);
+    return;
+  }
+
+  Status = AvbParse_VbmetaHeader (PartBuf + Footer.VbmetaOffset,
+                                  Footer.VbmetaSize, &VbHdr);
+  if (EFI_ERROR (Status)) {
+    FastbootFail ("invalid AVB vbmeta header at footer offset");
+    FreePool (PartBuf);
+    return;
+  }
+
+  /* ---- staged image must be at least as large as the target partition ---- */
+  if (mFlashNumDataBytes < PartSize) {
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "staged image (%llu B) < partition size (%llu B) — too small",
+                 mFlashNumDataBytes, PartSize);
+    FastbootFail (Resp);
+    FreePool (PartBuf);
+    return;
+  }
+
+  /* ---- magic check on staged image ---- */
+  if (AsciiStrCmp (PartName, "recovery") == 0) {
+    /* Android boot/recovery magic: "ANDROID!" at byte 0 */
+    if (AsciiStrnCmp ((CONST CHAR8 *)mFlashDataBuffer, "ANDROID!", 8) != 0) {
+      FastbootFail ("staged image missing ANDROID! magic (not a recovery image)");
+      FreePool (PartBuf);
+      return;
+    }
+  } else if (AsciiStrCmp (PartName, "dtbo") == 0) {
+    /* Accept FDT magic (0xD00DFEED) or DTBO table magic (0xD7B7AB1E) */
+    UINT32 Magic32;
+    CopyMem (&Magic32, mFlashDataBuffer, sizeof (UINT32));
+    /* Both constants are big-endian on-disk; compare raw bytes */
+    if (Magic32 != 0xEDFE0DD0 && /* 0xD00DFEED in little-endian */
+        Magic32 != 0x1EABB7D7) { /* 0xD7B7AB1E in little-endian */
+      FastbootFail ("staged image missing FDT/DTBO magic (not a dtbo image)");
+      FreePool (PartBuf);
+      return;
+    }
+  }
+
+  /* ---- info lines ---- */
+  AsciiSPrint (Resp, sizeof (Resp),
+               "donor footer: vbmeta_offset=%llu vbmeta_size=%llu orig_image_size=%llu",
+               Footer.VbmetaOffset, Footer.VbmetaSize, Footer.OriginalImageSize);
+  FastbootInfo (Resp);
+
+  AsciiSPrint (Resp, sizeof (Resp),
+               "donor header: avb %u.%u algo=%u auth_size=%llu aux_size=%llu",
+               VbHdr.AvbMajorVersion, VbHdr.AvbMinorVersion,
+               VbHdr.AlgorithmType,
+               VbHdr.AuthenticationDataBlockSize,
+               VbHdr.AuxiliaryDataBlockSize);
+  FastbootInfo (Resp);
+
+  AsciiSPrint (Resp, sizeof (Resp),
+               "target part=%llu B  staged=%llu B",
+               PartSize, mFlashNumDataBytes);
+  FastbootInfo (Resp);
+
+  /* ---- dry-run exit ---- */
+  if (!DoCommit) {
+    FreePool (PartBuf);
+    FastbootInfo ("DRY RUN — re-issue with 'commit' to write");
+    FastbootOkay ("");
+    return;
+  }
+
+  /* ---- graft: copy donor tail (vbmeta + padding) onto staged image ---- */
+  TailOffset = Footer.VbmetaOffset;
+  TailBytes  = PartSize - TailOffset;   /* from vbmeta start to partition end */
+
+  /* Bounds check: staged buffer must have room for the tail */
+  if (TailOffset + TailBytes > mFlashNumDataBytes) {
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "staged buffer too small for graft tail (need %llu B at +%llu)",
+                 TailBytes, TailOffset);
+    FastbootFail (Resp);
+    FreePool (PartBuf);
+    return;
+  }
+
+  CopyMem (mFlashDataBuffer + TailOffset, PartBuf + TailOffset, TailBytes);
+  FreePool (PartBuf);
+  PartBuf = NULL;
+
+  /* ---- write grafted image to partition ---- */
+  Status = WriteBlockToPartition (BlockIo, Handle, 0, PartSize, mFlashDataBuffer);
+  if (EFI_ERROR (Status)) {
+    AsciiSPrint (Resp, sizeof (Resp), "WriteBlockToPartition failed: %r", Status);
+    FastbootFail (Resp);
+    return;
+  }
+
+  AsciiSPrint (Resp, sizeof (Resp),
+               "grafted %s: replaced last %llu bytes (vbmeta tail from stock)",
+               ResolvedName, TailBytes);
+  FastbootOkay (Resp);
+}
+
 #endif /* GBL_EXPERIMENTAL_FASTBOOT_CMDS */
 
 /* Registers all Stock commands, Publishes all stock variables
@@ -4499,6 +4776,7 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
       {"oem escape", CmdOemEscape},
       {"oem rpmb-lock", CmdOemRpmbLock},
       {"oem rpmb-unlock", CmdOemRpmbUnlock},
+      {"oem graft-and-flash", CmdOemGraftAndFlash},
 #endif
       {"oem boot-efi", CmdOemBootEfi},
       {"oem bcb-recovery", CmdOemBcbRecovery},
