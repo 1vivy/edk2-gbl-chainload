@@ -4727,9 +4727,9 @@ typedef struct {
   VOID   *user_data;
 } GBL_AvbSHA256Ctx;
 
-VOID   avb_sha256_init   (GBL_AvbSHA256Ctx *ctx);
-VOID   avb_sha256_update (GBL_AvbSHA256Ctx *ctx, CONST UINT8 *data, UINT32 len);
-UINT8 *avb_sha256_final  (GBL_AvbSHA256Ctx *ctx);
+VOID   avb_sha256_init   (VOID *ctx);
+VOID   avb_sha256_update (VOID *ctx, CONST UINT8 *data, UINT32 len);
+UINT8 *avb_sha256_final  (VOID *ctx);
 
 #define GBL_VBMETA_SHA256_LEN  GBL_AVB_SHA256_DIGEST_SIZE
 #define GBL_VBMETA_HEX_LEN    65   /* 32*2 + NUL */
@@ -4740,6 +4740,34 @@ typedef enum {
   GblPartDescHash  = 1,
   GblPartDescChain = 2,
 } GBL_PART_DESC_TYPE;
+
+/*
+ * GblFastbootRespondLong — emit Value across one or more FastbootInfo packets,
+ * then close with FastbootOkay ("").  Use for variables whose value can exceed
+ * MAX_RSP_SIZE - sizeof("OKAY") - 1 (= 59 bytes).
+ *
+ * FastbootInfo prepends "INFO" automatically, so Chunk must NOT include it.
+ * Each INFO packet carries at most MAX_RSP_SIZE - 4 (tag) - 1 (NUL) = 59 chars.
+ */
+STATIC VOID
+GblFastbootRespondLong (IN CONST CHAR8 *Value)
+{
+  CHAR8       Chunk[MAX_RSP_SIZE];
+  UINTN       Total      = AsciiStrLen (Value);
+  UINTN       Pos        = 0;
+  CONST UINTN ChunkBytes = MAX_RSP_SIZE - sizeof ("INFO") - 1;  /* = 59 */
+
+  while (Pos < Total) {
+    UINTN N = Total - Pos;
+    if (N > ChunkBytes)
+      N = ChunkBytes;
+    CopyMem (Chunk, Value + Pos, N);
+    Chunk[N] = '\0';
+    FastbootInfo (Chunk);
+    Pos += N;
+  }
+  FastbootOkay ("");
+}
 
 /*
  * GblVbmetaHexDump — write Len bytes as lowercase hex into Out.
@@ -4904,25 +4932,27 @@ GblVbmetaLookupDescriptor (
 /* ---- per-variable formatters -------------------------------------------- */
 
 STATIC VOID
-GblGetVarVbmetaDigest (OUT CHAR8 *Out, IN UINTN OutCap)
+GblGetVarVbmetaDigest (VOID)
 {
-  EFI_STATUS   Status;
-  UINT8       *Buf  = NULL;
-  UINT64       Size = 0;
+  EFI_STATUS       Status;
+  UINT8           *Buf  = NULL;
+  UINT64           Size = 0;
   GBL_AvbSHA256Ctx Ctx;
-  UINT8       *Digest;
+  UINT8           *Digest;
+  CHAR8            Long[GBL_VBMETA_HEX_LEN];  /* 65 bytes — fits 32-byte digest */
 
   Status = GblVbmetaReadActiveSlot (&Buf, &Size);
   if (EFI_ERROR (Status)) {
-    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    FastbootOkay ("error");
     return;
   }
 
   avb_sha256_init (&Ctx);
   avb_sha256_update (&Ctx, Buf, (UINT32)Size);
   Digest = avb_sha256_final (&Ctx);
-  GblVbmetaHexDump (Digest, GBL_VBMETA_SHA256_LEN, Out, OutCap);
+  GblVbmetaHexDump (Digest, GBL_VBMETA_SHA256_LEN, Long, sizeof (Long));
   FreePool (Buf);
+  GblFastbootRespondLong (Long);
 }
 
 STATIC VOID
@@ -4932,7 +4962,7 @@ GblGetVarVbmetaSlot (OUT CHAR8 *Out, IN UINTN OutCap)
   /* Suffix is e.g. L"_a"; skip the leading underscore */
   CHAR8 SlotAsc[MAX_SLOT_SUFFIX_SZ];
 
-  UnicodeStrToAsciiStr (CurrentSlot.Suffix, SlotAsc);
+  UnicodeStrToAsciiStrS (CurrentSlot.Suffix, SlotAsc, sizeof (SlotAsc));
   /* SlotAsc[0] == '_', SlotAsc[1] == 'a'/'b', SlotAsc[2] == '\0' */
   if (SlotAsc[0] == '_' && SlotAsc[1] != '\0')
     AsciiStrnCpyS (Out, OutCap, SlotAsc + 1, OutCap - 1);
@@ -4956,7 +4986,7 @@ GblGetVarVbmetaPartStatus (IN CONST CHAR8 *PartName,
   /* Read vbmeta */
   Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
   if (EFI_ERROR (Status)) {
-    AsciiStrnCpyS (Out, OutCap, EFI_ERROR (Status) == EFI_NOT_FOUND ?
+    AsciiStrnCpyS (Out, OutCap, Status == EFI_NOT_FOUND ?
                    "n/a" : "error", OutCap - 1);
     return;
   }
@@ -5121,8 +5151,7 @@ GblGetVarVbmetaPartDescType (IN CONST CHAR8 *PartName,
 }
 
 STATIC VOID
-GblGetVarVbmetaPartExpected (IN CONST CHAR8 *PartName,
-                              OUT CHAR8 *Out, IN UINTN OutCap)
+GblGetVarVbmetaPartExpected (IN CONST CHAR8 *PartName)
 {
   EFI_STATUS          Status;
   UINT8              *VbmBuf  = NULL;
@@ -5133,7 +5162,7 @@ GblGetVarVbmetaPartExpected (IN CONST CHAR8 *PartName,
 
   Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
   if (EFI_ERROR (Status)) {
-    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    FastbootOkay ("error");
     return;
   }
 
@@ -5142,24 +5171,36 @@ GblGetVarVbmetaPartExpected (IN CONST CHAR8 *PartName,
                                       &PubKey, &PubKeyLen);
   if (EFI_ERROR (Status)) {
     FreePool (VbmBuf);
-    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    FastbootOkay ("error");
     return;
   }
 
   if (Type == GblPartDescHash && Digest != NULL && DigestLen > 0) {
-    GblVbmetaHexDump (Digest, DigestLen, Out, OutCap);
+    CHAR8 Long[GBL_VBMETA_HEX_LEN];
+    GblVbmetaHexDump (Digest, DigestLen, Long, sizeof (Long));
+    FreePool (VbmBuf);
+    GblFastbootRespondLong (Long);
   } else if (Type == GblPartDescChain && PubKey != NULL && PubKeyLen > 0) {
-    GblVbmetaHexDump (PubKey, PubKeyLen, Out, OutCap);
+    /* Pubkeys can be up to 1024 bytes (8192-bit RSA) = 2048 hex chars + NUL */
+    UINTN  HexLen = (UINTN)PubKeyLen * 2 + 1;
+    CHAR8 *Long   = AllocatePool (HexLen);
+    if (Long == NULL) {
+      FreePool (VbmBuf);
+      FastbootOkay ("error");
+      return;
+    }
+    GblVbmetaHexDump (PubKey, PubKeyLen, Long, HexLen);
+    FreePool (VbmBuf);
+    GblFastbootRespondLong (Long);
+    FreePool (Long);
   } else {
-    AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
+    FreePool (VbmBuf);
+    FastbootOkay ("n/a");
   }
-
-  FreePool (VbmBuf);
 }
 
 STATIC VOID
-GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName,
-                              OUT CHAR8 *Out, IN UINTN OutCap)
+GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName)
 {
   EFI_STATUS          Status;
   UINT8              *VbmBuf  = NULL;
@@ -5170,7 +5211,7 @@ GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName,
 
   Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
   if (EFI_ERROR (Status)) {
-    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    FastbootOkay ("error");
     return;
   }
 
@@ -5180,7 +5221,7 @@ GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName,
   FreePool (VbmBuf);
 
   if (EFI_ERROR (Status)) {
-    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    FastbootOkay ("error");
     return;
   }
 
@@ -5194,11 +5235,12 @@ GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName,
     UINT64                 ReadBytes;
     GBL_AvbSHA256Ctx       Ctx;
     UINT8                 *Computed;
+    CHAR8                  Long[GBL_VBMETA_HEX_LEN];
 
     Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
                                       PartResolved, ARRAY_SIZE (PartResolved));
     if (EFI_ERROR (Status) || PartBlk == NULL) {
-      AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
+      FastbootOkay ("n/a");
       return;
     }
 
@@ -5207,7 +5249,7 @@ GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName,
                 & ~(PartBlk->Media->BlockSize - 1);
     PartBuf = AllocatePool (ReadBytes);
     if (PartBuf == NULL) {
-      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+      FastbootOkay ("error");
       return;
     }
 
@@ -5215,7 +5257,7 @@ GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName,
                                   0, ReadBytes, PartBuf);
     if (EFI_ERROR (Status)) {
       FreePool (PartBuf);
-      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+      FastbootOkay ("error");
       return;
     }
 
@@ -5224,7 +5266,8 @@ GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName,
     Computed = avb_sha256_final (&Ctx);
     FreePool (PartBuf);
 
-    GblVbmetaHexDump (Computed, GBL_VBMETA_SHA256_LEN, Out, OutCap);
+    GblVbmetaHexDump (Computed, GBL_VBMETA_SHA256_LEN, Long, sizeof (Long));
+    GblFastbootRespondLong (Long);
     return;
   }
 
@@ -5241,7 +5284,7 @@ GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName,
     Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
                                       PartResolved, ARRAY_SIZE (PartResolved));
     if (EFI_ERROR (Status) || PartBlk == NULL) {
-      AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
+      FastbootOkay ("n/a");
       return;
     }
 
@@ -5250,7 +5293,7 @@ GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName,
                 & ~(PartBlk->Media->BlockSize - 1);
     PartBuf = AllocatePool (ReadBytes);
     if (PartBuf == NULL) {
-      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+      FastbootOkay ("error");
       return;
     }
 
@@ -5258,25 +5301,31 @@ GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName,
                                   0, ReadBytes, PartBuf);
     if (EFI_ERROR (Status)) {
       FreePool (PartBuf);
-      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+      FastbootOkay ("error");
       return;
     }
 
     if (EFI_ERROR (AvbParse_Footer (PartBuf, PartSize, &ChainFooter)))
-      AsciiStrnCpyS (Out, OutCap, "unsigned", OutCap - 1);
+      FastbootOkay ("unsigned");
     else
-      AsciiStrnCpyS (Out, OutCap, "ok", OutCap - 1);
+      FastbootOkay ("ok");
 
     FreePool (PartBuf);
     return;
   }
 
-  AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
+  FastbootOkay ("n/a");
 }
 
 /*
  * GblCmdGetVarVbmeta — called from CmdGetVar when Arg starts with "vbmeta:".
- * Returns TRUE if the variable was handled (Resp filled), FALSE otherwise.
+ * Returns TRUE if the variable was handled, FALSE otherwise.
+ *
+ * Long-value variables (digest, expected, computed) call GblFastbootRespondLong
+ * internally and do not use the Resp buffer — the dispatcher must NOT call
+ * FastbootOkay() again for those paths.
+ * Short-value variables (slot, status, descriptor-type) fill Resp and the
+ * dispatcher calls FastbootOkay(Resp).
  */
 STATIC BOOLEAN
 GblCmdGetVarVbmeta (IN CONST CHAR8 *Arg)
@@ -5286,8 +5335,7 @@ GblCmdGetVarVbmeta (IN CONST CHAR8 *Arg)
   Resp[0] = '\0';
 
   if (AsciiStrCmp (Arg, "vbmeta:digest") == 0) {
-    GblGetVarVbmetaDigest (Resp, sizeof (Resp));
-    FastbootOkay (Resp);
+    GblGetVarVbmetaDigest ();   /* sends INFO+OKAY internally */
     return TRUE;
   }
 
@@ -5328,13 +5376,11 @@ GblCmdGetVarVbmeta (IN CONST CHAR8 *Arg)
       return TRUE;
     }
     if (AsciiStrCmp (Field, "expected") == 0) {
-      GblGetVarVbmetaPartExpected (PartName, Resp, sizeof (Resp));
-      FastbootOkay (Resp);
+      GblGetVarVbmetaPartExpected (PartName);  /* sends INFO+OKAY internally */
       return TRUE;
     }
     if (AsciiStrCmp (Field, "computed") == 0) {
-      GblGetVarVbmetaPartComputed (PartName, Resp, sizeof (Resp));
-      FastbootOkay (Resp);
+      GblGetVarVbmetaPartComputed (PartName);  /* sends INFO+OKAY internally */
       return TRUE;
     }
   }
