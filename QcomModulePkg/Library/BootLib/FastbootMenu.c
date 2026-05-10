@@ -85,7 +85,9 @@ STATIC OPTION_MENU_INFO gMenuInfo;
 # define GBL_MODE 0
 #endif
 
-#if (GBL_MODE == 1)
+#if (GBL_MODE == 0)
+# define GBL_CHAINLOAD_MODE  "mode-0"
+#elif (GBL_MODE == 1)
 # define GBL_CHAINLOAD_MODE  "mode-1"
 #elif (GBL_MODE == 2)
 # define GBL_CHAINLOAD_MODE  "mode-2"
