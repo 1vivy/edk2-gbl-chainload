@@ -5752,6 +5752,26 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
   FastbootPublishVar ("product", FullProduct);
   FastbootPublishVar ("serialno", StrSerialNum);
   FastbootPublishVar ("secure", IsSecureBootEnabled () ? "yes" : "no");
+
+  /* gbl-chainload boot-mode getvar: exposes the GBL_MODE this FastbootLib
+     was built with. Used by scripts/test-device-automatic.sh to confirm we
+     landed in our FastbootLib (not stock) and identify the mode. */
+#ifdef GBL_MODE
+#if (GBL_MODE == 0)
+  FastbootPublishVar ("boot-mode", "gbl-mode-0");
+#elif (GBL_MODE == 1)
+  FastbootPublishVar ("boot-mode", "gbl-mode-1");
+#elif (GBL_MODE == 2)
+  FastbootPublishVar ("boot-mode", "gbl-mode-2");
+#elif (GBL_MODE == 3)
+  FastbootPublishVar ("boot-mode", "gbl-mode-3");
+#else
+  FastbootPublishVar ("boot-mode", "gbl-mode-unknown");
+#endif
+#else
+  FastbootPublishVar ("boot-mode", "gbl-mode-undef");
+#endif
+
   if (MultiSlotBoot) {
     /*Find ActiveSlot, bydefault _a will be the active slot
      *Populate MultiSlotMeta data will publish fastboot variables
