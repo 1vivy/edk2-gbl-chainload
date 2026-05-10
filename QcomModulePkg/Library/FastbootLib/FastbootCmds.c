@@ -4653,6 +4653,7 @@ CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
                "donor footer: vbmeta_offset=%llu vbmeta_size=%llu orig_image_size=%llu",
                Footer.VbmetaOffset, Footer.VbmetaSize, Footer.OriginalImageSize);
   FastbootInfo (Resp);
+  WaitForTransferComplete ();
 
   AsciiSPrint (Resp, sizeof (Resp),
                "donor header: avb %u.%u algo=%u auth_size=%llu aux_size=%llu",
@@ -4661,17 +4662,21 @@ CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
                VbHdr.AuthenticationDataBlockSize,
                VbHdr.AuxiliaryDataBlockSize);
   FastbootInfo (Resp);
+  WaitForTransferComplete ();
 
   AsciiSPrint (Resp, sizeof (Resp),
                "target part=%llu B  staged=%llu B",
                PartSize, mFlashNumDataBytes);
   FastbootInfo (Resp);
+  WaitForTransferComplete ();
 
   /* ---- dry-run exit ---- */
   if (!DoCommit) {
     FreePool (PartBuf);
     FastbootInfo ("DRY RUN -- re-issue with 'commit' to write");
+    WaitForTransferComplete ();
     FastbootOkay ("");
+    WaitForTransferComplete ();
     return;
   }
 
@@ -4705,6 +4710,7 @@ CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
                "grafted %s: replaced last %llu bytes (vbmeta tail from stock)",
                ResolvedName, TailBytes);
   FastbootOkay (Resp);
+  WaitForTransferComplete ();
 }
 
 /* -------------------------------------------------------------------------
@@ -4759,6 +4765,7 @@ GblFastbootInfoLong (IN CONST CHAR8 *Value)
 
   if (Total == 0) {
     FastbootInfo ("");
+    WaitForTransferComplete ();
     return;
   }
   while (Pos < Total) {
@@ -4768,6 +4775,7 @@ GblFastbootInfoLong (IN CONST CHAR8 *Value)
     CopyMem (Chunk, Value + Pos, N);
     Chunk[N] = '\0';
     FastbootInfo (Chunk);
+    WaitForTransferComplete ();
     Pos += N;
   }
 }
@@ -4782,6 +4790,7 @@ GblFastbootRespondLong (IN CONST CHAR8 *Value)
 {
   GblFastbootInfoLong (Value);
   FastbootOkay ("");
+  WaitForTransferComplete ();
 }
 
 /*
@@ -5634,6 +5643,7 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 
   FreePool (VbmBuf);
   FastbootOkay ("");
+  WaitForTransferComplete ();
 }
 
 #endif /* GBL_EXPERIMENTAL_FASTBOOT_CMDS */
