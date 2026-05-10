@@ -3067,6 +3067,11 @@ STATIC VOID CmdGetVarAll (VOID)
   FastbootOkay (GetVarAll);
 }
 
+#if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
+/* Forward declaration — defined later in the GBL_EXPERIMENTAL block */
+STATIC BOOLEAN GblCmdGetVarVbmeta (IN CONST CHAR8 *Arg);
+#endif
+
 STATIC VOID
 CmdGetVar (CONST CHAR8 *Arg, VOID *Data, UINT32 Size)
 {
@@ -3111,6 +3116,14 @@ CmdGetVar (CONST CHAR8 *Arg, VOID *Data, UINT32 Size)
       return;
     }
   }
+
+#if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
+  /* Handle dynamic vbmeta:* variables */
+  if (AsciiStrnCmp (Arg, "vbmeta:", AsciiStrLen ("vbmeta:")) == 0) {
+    if (GblCmdGetVarVbmeta (Arg))
+      return;
+  }
+#endif
 
   FastbootFail ("GetVar Variable Not found");
 }
@@ -4692,6 +4705,641 @@ CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
                "grafted %s: replaced last %llu bytes (vbmeta tail from stock)",
                ResolvedName, TailBytes);
   FastbootOkay (Resp);
+}
+
+/* -------------------------------------------------------------------------
+ * getvar vbmeta:* handlers
+ *
+ * SHA256 is provided by AvbLib (linked transitively via BootLib → AvbLib).
+ * Forward-declare the avb_sha256 context and functions to avoid the
+ * AVB_INSIDE_LIBAVB_H include-guard problem.
+ * -------------------------------------------------------------------------
+ */
+#define GBL_AVB_SHA256_DIGEST_SIZE  32
+#define GBL_AVB_SHA256_BLOCK_SIZE   64
+
+typedef struct {
+  UINT32  h[8];
+  UINT32  tot_len;
+  UINT32  len;
+  UINT8   block[2 * GBL_AVB_SHA256_BLOCK_SIZE];
+  UINT8   buf[GBL_AVB_SHA256_DIGEST_SIZE];
+  VOID   *user_data;
+} GBL_AvbSHA256Ctx;
+
+VOID   avb_sha256_init   (GBL_AvbSHA256Ctx *ctx);
+VOID   avb_sha256_update (GBL_AvbSHA256Ctx *ctx, CONST UINT8 *data, UINT32 len);
+UINT8 *avb_sha256_final  (GBL_AvbSHA256Ctx *ctx);
+
+#define GBL_VBMETA_SHA256_LEN  GBL_AVB_SHA256_DIGEST_SIZE
+#define GBL_VBMETA_HEX_LEN    65   /* 32*2 + NUL */
+
+/* Descriptor type tags seen in the walk */
+typedef enum {
+  GblPartDescNone  = 0,
+  GblPartDescHash  = 1,
+  GblPartDescChain = 2,
+} GBL_PART_DESC_TYPE;
+
+/*
+ * GblVbmetaHexDump — write Len bytes as lowercase hex into Out.
+ * Out must be at least Len*2+1 bytes.  Always NUL-terminates.
+ */
+STATIC VOID
+GblVbmetaHexDump (CONST UINT8 *Bytes, UINT32 Len, CHAR8 *Out, UINTN OutCap)
+{
+  STATIC CONST CHAR8 HexChars[] = "0123456789abcdef";
+  UINTN i;
+  UINTN Pos = 0;
+
+  for (i = 0; i < Len && (Pos + 2) < OutCap; i++) {
+    Out[Pos++] = HexChars[(Bytes[i] >> 4) & 0xF];
+    Out[Pos++] = HexChars[Bytes[i] & 0xF];
+  }
+  if (Pos < OutCap)
+    Out[Pos] = '\0';
+  else
+    Out[OutCap - 1] = '\0';
+}
+
+/*
+ * GblVbmetaReadActiveSlot — allocate and read the active-slot vbmeta partition.
+ * Caller must FreePool(*BufOut) on success.
+ */
+STATIC EFI_STATUS
+GblVbmetaReadActiveSlot (OUT UINT8 **BufOut, OUT UINT64 *SizeOut)
+{
+  EFI_STATUS              Status;
+  EFI_BLOCK_IO_PROTOCOL  *BlockIo = NULL;
+  EFI_HANDLE             *Handle  = NULL;
+  CHAR16                  ResolvedName[MAX_GPT_NAME_SIZE];
+  UINT64                  PartSize;
+  UINT64                  BlockSize;
+  UINT64                  ReadBytes;
+  UINT8                  *Buf;
+
+  Status = LocatePartitionForGraft ("vbmeta", &BlockIo, &Handle,
+                                    ResolvedName, ARRAY_SIZE (ResolvedName));
+  if (EFI_ERROR (Status) || BlockIo == NULL)
+    return EFI_NOT_FOUND;
+
+  PartSize = GetPartitionSize (BlockIo);
+  if (PartSize == 0)
+    return EFI_DEVICE_ERROR;
+
+  BlockSize = BlockIo->Media->BlockSize;
+  ReadBytes = (PartSize + BlockSize - 1) & ~(BlockSize - 1);
+
+  Buf = AllocatePool (ReadBytes);
+  if (Buf == NULL)
+    return EFI_OUT_OF_RESOURCES;
+
+  Status = BlockIo->ReadBlocks (BlockIo, BlockIo->Media->MediaId,
+                                0, ReadBytes, Buf);
+  if (EFI_ERROR (Status)) {
+    FreePool (Buf);
+    return Status;
+  }
+
+  *BufOut  = Buf;
+  *SizeOut = PartSize;
+  return EFI_SUCCESS;
+}
+
+/*
+ * GblVbmetaLookupDescriptor — walk vbmeta aux descriptors for PartName.
+ * On match sets TypeOut and digest or pubkey out-pointers.
+ * All out-pointers reference memory inside VbmBuf; caller must not free them.
+ */
+STATIC EFI_STATUS
+GblVbmetaLookupDescriptor (
+  IN  CONST UINT8            *VbmBuf,
+  IN  UINT64                  VbmSize,
+  IN  CONST CHAR8            *PartName,
+  OUT GBL_PART_DESC_TYPE     *TypeOut,
+  OUT CONST UINT8           **DigestOut,
+  OUT UINT32                 *DigestLenOut,
+  OUT CONST UINT8           **PubKeyOut,
+  OUT UINT32                 *PubKeyLenOut
+  )
+{
+  EFI_STATUS              Status;
+  GBL_AVB_VBMETA_HEADER   Hdr;
+  CONST UINT8            *AuxBlock;
+  UINT64                  AuxSize;
+  UINT64                  AuxOff;
+  UINT64                  Cursor = 0;
+  GBL_AVB_DESCRIPTOR_TAG  Tag;
+  CONST UINT8            *Desc;
+  UINT64                  DescLen;
+  CONST UINT8            *DName;
+  UINT32                  DNameLen;
+  UINT32                  PartNameLen;
+
+  *TypeOut      = GblPartDescNone;
+  *DigestOut    = NULL;
+  *DigestLenOut = 0;
+  *PubKeyOut    = NULL;
+  *PubKeyLenOut = 0;
+
+  if (VbmSize < GBL_AVB_VBMETA_HEADER_SIZE)
+    return EFI_INVALID_PARAMETER;
+
+  Status = AvbParse_VbmetaHeader (VbmBuf, VbmSize, &Hdr);
+  if (EFI_ERROR (Status))
+    return Status;
+
+  /* Auxiliary block starts after the fixed header + auth block */
+  AuxOff  = (UINT64)GBL_AVB_VBMETA_HEADER_SIZE + Hdr.AuthenticationDataBlockSize;
+  AuxSize = Hdr.AuxiliaryDataBlockSize;
+
+  if (AuxOff + AuxSize > VbmSize)
+    return EFI_VOLUME_CORRUPTED;
+
+  AuxBlock    = VbmBuf + AuxOff;
+  PartNameLen = (UINT32)AsciiStrLen (PartName);
+
+  while (TRUE) {
+    Status = AvbParse_NextDescriptor (AuxBlock, AuxSize, &Cursor,
+                                      &Tag, &Desc, &DescLen);
+    if (EFI_ERROR (Status))
+      break;  /* end of descriptors or error */
+
+    if (Tag == GblAvbDescHashTag) {
+      if (EFI_ERROR (AvbParse_HashDescriptor (Desc, DescLen,
+                                              &DName, &DNameLen,
+                                              DigestOut, DigestLenOut)))
+        continue;
+      if (DNameLen != PartNameLen)
+        continue;
+      /* DName is not NUL-terminated; compare byte-by-byte */
+      if (CompareMem (DName, PartName, DNameLen) == 0) {
+        *TypeOut = GblPartDescHash;
+        return EFI_SUCCESS;
+      }
+      *DigestOut    = NULL;
+      *DigestLenOut = 0;
+    } else if (Tag == GblAvbDescChainPartitionTag) {
+      if (EFI_ERROR (AvbParse_ChainPartitionDescriptor (Desc, DescLen,
+                                                        &DName, &DNameLen,
+                                                        PubKeyOut, PubKeyLenOut)))
+        continue;
+      if (DNameLen != PartNameLen)
+        continue;
+      if (CompareMem (DName, PartName, DNameLen) == 0) {
+        *TypeOut = GblPartDescChain;
+        return EFI_SUCCESS;
+      }
+      *PubKeyOut    = NULL;
+      *PubKeyLenOut = 0;
+    } else {
+      /* Skip other descriptor types */
+
+    }
+  }
+
+  return EFI_SUCCESS;  /* *TypeOut == GblPartDescNone → not found */
+}
+
+/* ---- per-variable formatters -------------------------------------------- */
+
+STATIC VOID
+GblGetVarVbmetaDigest (OUT CHAR8 *Out, IN UINTN OutCap)
+{
+  EFI_STATUS   Status;
+  UINT8       *Buf  = NULL;
+  UINT64       Size = 0;
+  GBL_AvbSHA256Ctx Ctx;
+  UINT8       *Digest;
+
+  Status = GblVbmetaReadActiveSlot (&Buf, &Size);
+  if (EFI_ERROR (Status)) {
+    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    return;
+  }
+
+  avb_sha256_init (&Ctx);
+  avb_sha256_update (&Ctx, Buf, (UINT32)Size);
+  Digest = avb_sha256_final (&Ctx);
+  GblVbmetaHexDump (Digest, GBL_VBMETA_SHA256_LEN, Out, OutCap);
+  FreePool (Buf);
+}
+
+STATIC VOID
+GblGetVarVbmetaSlot (OUT CHAR8 *Out, IN UINTN OutCap)
+{
+  Slot  CurrentSlot = GetCurrentSlotSuffix ();
+  /* Suffix is e.g. L"_a"; skip the leading underscore */
+  CHAR8 SlotAsc[MAX_SLOT_SUFFIX_SZ];
+
+  UnicodeStrToAsciiStr (CurrentSlot.Suffix, SlotAsc);
+  /* SlotAsc[0] == '_', SlotAsc[1] == 'a'/'b', SlotAsc[2] == '\0' */
+  if (SlotAsc[0] == '_' && SlotAsc[1] != '\0')
+    AsciiStrnCpyS (Out, OutCap, SlotAsc + 1, OutCap - 1);
+  else
+    AsciiStrnCpyS (Out, OutCap, SlotAsc, OutCap - 1);
+}
+
+STATIC VOID
+GblGetVarVbmetaPartStatus (IN CONST CHAR8 *PartName,
+                            OUT CHAR8 *Out, IN UINTN OutCap)
+{
+  EFI_STATUS           Status;
+  UINT8               *VbmBuf  = NULL;
+  UINT64               VbmSize = 0;
+  GBL_PART_DESC_TYPE   Type;
+  CONST UINT8         *Digest    = NULL;
+  UINT32               DigestLen = 0;
+  CONST UINT8         *PubKey    = NULL;
+  UINT32               PubKeyLen = 0;
+
+  /* Read vbmeta */
+  Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
+  if (EFI_ERROR (Status)) {
+    AsciiStrnCpyS (Out, OutCap, EFI_ERROR (Status) == EFI_NOT_FOUND ?
+                   "n/a" : "error", OutCap - 1);
+    return;
+  }
+
+  Status = GblVbmetaLookupDescriptor (VbmBuf, VbmSize, PartName,
+                                      &Type, &Digest, &DigestLen,
+                                      &PubKey, &PubKeyLen);
+  if (EFI_ERROR (Status)) {
+    FreePool (VbmBuf);
+    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    return;
+  }
+
+  if (Type == GblPartDescNone) {
+    FreePool (VbmBuf);
+    AsciiStrnCpyS (Out, OutCap, "unsigned", OutCap - 1);
+    return;
+  }
+
+  if (Type == GblPartDescHash) {
+    /* Compute SHA256 of the named partition and compare with stored digest */
+    EFI_BLOCK_IO_PROTOCOL *PartBlk  = NULL;
+    EFI_HANDLE            *PartHdl  = NULL;
+    CHAR16                 PartResolved[MAX_GPT_NAME_SIZE];
+    UINT8                 *PartBuf  = NULL;
+    UINT64                 PartSize = 0;
+    UINT64                 ReadBytes;
+    GBL_AvbSHA256Ctx       Ctx;
+    UINT8                 *Computed;
+    CONST CHAR8           *Result = "ok";
+
+    Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
+                                      PartResolved, ARRAY_SIZE (PartResolved));
+    if (EFI_ERROR (Status) || PartBlk == NULL) {
+      FreePool (VbmBuf);
+      AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
+      return;
+    }
+
+    PartSize = GetPartitionSize (PartBlk);
+    if (PartSize == 0) {
+      FreePool (VbmBuf);
+      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+      return;
+    }
+
+    ReadBytes = (PartSize + PartBlk->Media->BlockSize - 1)
+                & ~(PartBlk->Media->BlockSize - 1);
+    PartBuf = AllocatePool (ReadBytes);
+    if (PartBuf == NULL) {
+      FreePool (VbmBuf);
+      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+      return;
+    }
+
+    Status = PartBlk->ReadBlocks (PartBlk, PartBlk->Media->MediaId,
+                                  0, ReadBytes, PartBuf);
+    if (EFI_ERROR (Status)) {
+      FreePool (PartBuf);
+      FreePool (VbmBuf);
+      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+      return;
+    }
+
+    avb_sha256_init (&Ctx);
+    avb_sha256_update (&Ctx, PartBuf, (UINT32)PartSize);
+    Computed = avb_sha256_final (&Ctx);
+    FreePool (PartBuf);
+
+    if (DigestLen != GBL_VBMETA_SHA256_LEN ||
+        CompareMem (Computed, Digest, GBL_VBMETA_SHA256_LEN) != 0)
+      Result = "mismatch";
+
+    FreePool (VbmBuf);
+    AsciiStrnCpyS (Out, OutCap, Result, OutCap - 1);
+    return;
+  }
+
+  /* Chain partition: presence of footer indicates chained vbmeta */
+  if (Type == GblPartDescChain) {
+    EFI_BLOCK_IO_PROTOCOL *PartBlk  = NULL;
+    EFI_HANDLE            *PartHdl  = NULL;
+    CHAR16                 PartResolved[MAX_GPT_NAME_SIZE];
+    UINT8                 *PartBuf  = NULL;
+    UINT64                 PartSize = 0;
+    UINT64                 ReadBytes;
+    GBL_AVB_FOOTER         ChainFooter;
+
+    Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
+                                      PartResolved, ARRAY_SIZE (PartResolved));
+    if (EFI_ERROR (Status) || PartBlk == NULL) {
+      FreePool (VbmBuf);
+      AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
+      return;
+    }
+
+    PartSize = GetPartitionSize (PartBlk);
+    ReadBytes = (PartSize + PartBlk->Media->BlockSize - 1)
+                & ~(PartBlk->Media->BlockSize - 1);
+    PartBuf = AllocatePool (ReadBytes);
+    if (PartBuf == NULL) {
+      FreePool (VbmBuf);
+      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+      return;
+    }
+
+    Status = PartBlk->ReadBlocks (PartBlk, PartBlk->Media->MediaId,
+                                  0, ReadBytes, PartBuf);
+    if (EFI_ERROR (Status)) {
+      FreePool (PartBuf);
+      FreePool (VbmBuf);
+      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+      return;
+    }
+
+    if (EFI_ERROR (AvbParse_Footer (PartBuf, PartSize, &ChainFooter)))
+      AsciiStrnCpyS (Out, OutCap, "unsigned", OutCap - 1);
+    else
+      AsciiStrnCpyS (Out, OutCap, "ok", OutCap - 1);
+
+    FreePool (PartBuf);
+    FreePool (VbmBuf);
+    return;
+  }
+
+  FreePool (VbmBuf);
+  AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
+}
+
+STATIC VOID
+GblGetVarVbmetaPartDescType (IN CONST CHAR8 *PartName,
+                              OUT CHAR8 *Out, IN UINTN OutCap)
+{
+  EFI_STATUS          Status;
+  UINT8              *VbmBuf  = NULL;
+  UINT64              VbmSize = 0;
+  GBL_PART_DESC_TYPE  Type;
+  CONST UINT8        *Digest = NULL;  UINT32 DigestLen = 0;
+  CONST UINT8        *PubKey = NULL;  UINT32 PubKeyLen = 0;
+
+  Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
+  if (EFI_ERROR (Status)) {
+    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    return;
+  }
+
+  Status = GblVbmetaLookupDescriptor (VbmBuf, VbmSize, PartName,
+                                      &Type, &Digest, &DigestLen,
+                                      &PubKey, &PubKeyLen);
+  FreePool (VbmBuf);
+
+  if (EFI_ERROR (Status)) {
+    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    return;
+  }
+
+  switch (Type) {
+  case GblPartDescHash:  AsciiStrnCpyS (Out, OutCap, "hash",  OutCap - 1); break;
+  case GblPartDescChain: AsciiStrnCpyS (Out, OutCap, "chain", OutCap - 1); break;
+  default:               AsciiStrnCpyS (Out, OutCap, "none",  OutCap - 1); break;
+  }
+}
+
+STATIC VOID
+GblGetVarVbmetaPartExpected (IN CONST CHAR8 *PartName,
+                              OUT CHAR8 *Out, IN UINTN OutCap)
+{
+  EFI_STATUS          Status;
+  UINT8              *VbmBuf  = NULL;
+  UINT64              VbmSize = 0;
+  GBL_PART_DESC_TYPE  Type;
+  CONST UINT8        *Digest = NULL;  UINT32 DigestLen = 0;
+  CONST UINT8        *PubKey = NULL;  UINT32 PubKeyLen = 0;
+
+  Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
+  if (EFI_ERROR (Status)) {
+    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    return;
+  }
+
+  Status = GblVbmetaLookupDescriptor (VbmBuf, VbmSize, PartName,
+                                      &Type, &Digest, &DigestLen,
+                                      &PubKey, &PubKeyLen);
+  if (EFI_ERROR (Status)) {
+    FreePool (VbmBuf);
+    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    return;
+  }
+
+  if (Type == GblPartDescHash && Digest != NULL && DigestLen > 0) {
+    GblVbmetaHexDump (Digest, DigestLen, Out, OutCap);
+  } else if (Type == GblPartDescChain && PubKey != NULL && PubKeyLen > 0) {
+    GblVbmetaHexDump (PubKey, PubKeyLen, Out, OutCap);
+  } else {
+    AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
+  }
+
+  FreePool (VbmBuf);
+}
+
+STATIC VOID
+GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName,
+                              OUT CHAR8 *Out, IN UINTN OutCap)
+{
+  EFI_STATUS          Status;
+  UINT8              *VbmBuf  = NULL;
+  UINT64              VbmSize = 0;
+  GBL_PART_DESC_TYPE  Type;
+  CONST UINT8        *Digest = NULL;  UINT32 DigestLen = 0;
+  CONST UINT8        *PubKey = NULL;  UINT32 PubKeyLen = 0;
+
+  Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
+  if (EFI_ERROR (Status)) {
+    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    return;
+  }
+
+  Status = GblVbmetaLookupDescriptor (VbmBuf, VbmSize, PartName,
+                                      &Type, &Digest, &DigestLen,
+                                      &PubKey, &PubKeyLen);
+  FreePool (VbmBuf);
+
+  if (EFI_ERROR (Status)) {
+    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    return;
+  }
+
+  if (Type == GblPartDescHash) {
+    /* Compute SHA256 over the partition content */
+    EFI_BLOCK_IO_PROTOCOL *PartBlk  = NULL;
+    EFI_HANDLE            *PartHdl  = NULL;
+    CHAR16                 PartResolved[MAX_GPT_NAME_SIZE];
+    UINT8                 *PartBuf  = NULL;
+    UINT64                 PartSize = 0;
+    UINT64                 ReadBytes;
+    GBL_AvbSHA256Ctx       Ctx;
+    UINT8                 *Computed;
+
+    Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
+                                      PartResolved, ARRAY_SIZE (PartResolved));
+    if (EFI_ERROR (Status) || PartBlk == NULL) {
+      AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
+      return;
+    }
+
+    PartSize  = GetPartitionSize (PartBlk);
+    ReadBytes = (PartSize + PartBlk->Media->BlockSize - 1)
+                & ~(PartBlk->Media->BlockSize - 1);
+    PartBuf = AllocatePool (ReadBytes);
+    if (PartBuf == NULL) {
+      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+      return;
+    }
+
+    Status = PartBlk->ReadBlocks (PartBlk, PartBlk->Media->MediaId,
+                                  0, ReadBytes, PartBuf);
+    if (EFI_ERROR (Status)) {
+      FreePool (PartBuf);
+      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+      return;
+    }
+
+    avb_sha256_init (&Ctx);
+    avb_sha256_update (&Ctx, PartBuf, (UINT32)PartSize);
+    Computed = avb_sha256_final (&Ctx);
+    FreePool (PartBuf);
+
+    GblVbmetaHexDump (Computed, GBL_VBMETA_SHA256_LEN, Out, OutCap);
+    return;
+  }
+
+  if (Type == GblPartDescChain) {
+    /* For chain: report whether the chained partition has an AVB footer */
+    EFI_BLOCK_IO_PROTOCOL *PartBlk  = NULL;
+    EFI_HANDLE            *PartHdl  = NULL;
+    CHAR16                 PartResolved[MAX_GPT_NAME_SIZE];
+    UINT8                 *PartBuf  = NULL;
+    UINT64                 PartSize = 0;
+    UINT64                 ReadBytes;
+    GBL_AVB_FOOTER         ChainFooter;
+
+    Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
+                                      PartResolved, ARRAY_SIZE (PartResolved));
+    if (EFI_ERROR (Status) || PartBlk == NULL) {
+      AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
+      return;
+    }
+
+    PartSize  = GetPartitionSize (PartBlk);
+    ReadBytes = (PartSize + PartBlk->Media->BlockSize - 1)
+                & ~(PartBlk->Media->BlockSize - 1);
+    PartBuf = AllocatePool (ReadBytes);
+    if (PartBuf == NULL) {
+      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+      return;
+    }
+
+    Status = PartBlk->ReadBlocks (PartBlk, PartBlk->Media->MediaId,
+                                  0, ReadBytes, PartBuf);
+    if (EFI_ERROR (Status)) {
+      FreePool (PartBuf);
+      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+      return;
+    }
+
+    if (EFI_ERROR (AvbParse_Footer (PartBuf, PartSize, &ChainFooter)))
+      AsciiStrnCpyS (Out, OutCap, "unsigned", OutCap - 1);
+    else
+      AsciiStrnCpyS (Out, OutCap, "ok", OutCap - 1);
+
+    FreePool (PartBuf);
+    return;
+  }
+
+  AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
+}
+
+/*
+ * GblCmdGetVarVbmeta — called from CmdGetVar when Arg starts with "vbmeta:".
+ * Returns TRUE if the variable was handled (Resp filled), FALSE otherwise.
+ */
+STATIC BOOLEAN
+GblCmdGetVarVbmeta (IN CONST CHAR8 *Arg)
+{
+  CHAR8 Resp[MAX_RSP_SIZE];
+
+  Resp[0] = '\0';
+
+  if (AsciiStrCmp (Arg, "vbmeta:digest") == 0) {
+    GblGetVarVbmetaDigest (Resp, sizeof (Resp));
+    FastbootOkay (Resp);
+    return TRUE;
+  }
+
+  if (AsciiStrCmp (Arg, "vbmeta:slot") == 0) {
+    GblGetVarVbmetaSlot (Resp, sizeof (Resp));
+    FastbootOkay (Resp);
+    return TRUE;
+  }
+
+  /* vbmeta:<part>:<field> */
+  {
+    /* Find first ':' after "vbmeta:" */
+    CONST CHAR8 *After  = Arg + AsciiStrLen ("vbmeta:");
+    CONST CHAR8 *Colon2 = AsciiStrStr (After, ":");
+    CONST CHAR8 *Field;
+    CHAR8        PartName[48];
+    UINT32       PNLen;
+
+    if (Colon2 == NULL)
+      return FALSE;
+
+    PNLen = (UINT32)(Colon2 - After);
+    if (PNLen == 0 || PNLen >= sizeof (PartName))
+      return FALSE;
+
+    AsciiStrnCpyS (PartName, sizeof (PartName), After, PNLen);
+
+    Field = Colon2 + 1;
+
+    if (AsciiStrCmp (Field, "status") == 0) {
+      GblGetVarVbmetaPartStatus (PartName, Resp, sizeof (Resp));
+      FastbootOkay (Resp);
+      return TRUE;
+    }
+    if (AsciiStrCmp (Field, "descriptor-type") == 0) {
+      GblGetVarVbmetaPartDescType (PartName, Resp, sizeof (Resp));
+      FastbootOkay (Resp);
+      return TRUE;
+    }
+    if (AsciiStrCmp (Field, "expected") == 0) {
+      GblGetVarVbmetaPartExpected (PartName, Resp, sizeof (Resp));
+      FastbootOkay (Resp);
+      return TRUE;
+    }
+    if (AsciiStrCmp (Field, "computed") == 0) {
+      GblGetVarVbmetaPartComputed (PartName, Resp, sizeof (Resp));
+      FastbootOkay (Resp);
+      return TRUE;
+    }
+  }
+
+  return FALSE;
 }
 
 #endif /* GBL_EXPERIMENTAL_FASTBOOT_CMDS */
