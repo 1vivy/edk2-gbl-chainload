@@ -5426,15 +5426,13 @@ GblCmdGetVarVbmeta (IN CONST CHAR8 *Arg)
 /*
  * CmdOemVbmetaStatus — `fastboot oem vbmeta-status`
  *
- * Emits a multi-line report covering each known partition's descriptor type,
- * expected digest / pubkey (hex), computed digest / footer status, and a
- * per-partition verdict.  After the per-partition table it emits the overall
- * vbmeta SHA-256 digest and raw flags word, then closes with OKAY.
+ * Compact one-INFO-packet-per-row table:
+ *   partition(15) descriptor(13) status   (~40 chars, fits one INFO packet)
  *
- * Output columns (via INFO packets, chunked through GblFastbootInfoLong):
- *   partition       descriptor    expected …   computed …   status
+ * Full expected/computed hex is available via:
+ *   getvar vbmeta:<part>:expected|computed
  *
- * Row format: "%-16a %-13a %-65a %-65a %a"
+ * After the per-partition table: vbmeta digest (sha256) and flags.
  *
  * Known partitions iterated:
  *   boot, init_boot, vendor_boot, recovery, dtbo,
@@ -5459,7 +5457,7 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   EFI_STATUS         Status;
   UINT8             *VbmBuf  = NULL;
   UINT64             VbmSize = 0;
-  CHAR8              Line[256];
+  CHAR8              Line[128];
   UINTN              Idx;
 
   /* ---- read vbmeta once ------------------------------------------------- */
@@ -5469,12 +5467,11 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
     return;
   }
 
-  /* ---- header row ------------------------------------------------------- */
-  AsciiSPrint (Line, sizeof (Line),
-               "%-16a %-13a %-65a %-65a %a",
-               "partition", "descriptor",
-               "expected", "computed", "status");
-  GblFastbootInfoLong (Line);
+  /* ---- header ----------------------------------------------------------- */
+  FastbootInfo ("partition       descriptor    status");
+  WaitForTransferComplete ();
+  FastbootInfo ("");
+  WaitForTransferComplete ();
 
   /* ---- per-partition rows ----------------------------------------------- */
   for (Idx = 0; Idx < NumKnown; Idx++) {
@@ -5484,6 +5481,8 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
     UINT32                DigestLen = 0;
     CONST UINT8          *PubKey    = NULL;
     UINT32                PubKeyLen = 0;
+    CONST CHAR8          *DescType;
+    CONST CHAR8          *RowStatus;
 
     /* Look up this partition's descriptor */
     Status = GblVbmetaLookupDescriptor (VbmBuf, VbmSize, PartName,
@@ -5496,9 +5495,6 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 
     /* ---- hash descriptor ------------------------------------------------ */
     if (Type == GblPartDescHash) {
-      CHAR8                  ExpHex[GBL_VBMETA_HEX_LEN];  /* 65 bytes */
-      CHAR8                  CmpHex[GBL_VBMETA_HEX_LEN];
-      CONST CHAR8           *RowStatus;
       EFI_BLOCK_IO_PROTOCOL *PartBlk  = NULL;
       EFI_HANDLE            *PartHdl  = NULL;
       CHAR16                 PartResolved[MAX_GPT_NAME_SIZE];
@@ -5508,17 +5504,11 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
       GBL_AvbSHA256Ctx       Ctx;
       UINT8                 *Computed;
 
-      /* Expected: stored digest hex */
-      if (Digest != NULL && DigestLen > 0)
-        GblVbmetaHexDump (Digest, DigestLen, ExpHex, sizeof (ExpHex));
-      else
-        AsciiStrnCpyS (ExpHex, sizeof (ExpHex), "n/a", sizeof (ExpHex) - 1);
+      DescType = "hash";
 
-      /* Computed: SHA256 of partition content */
       Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
                                         PartResolved, ARRAY_SIZE (PartResolved));
       if (EFI_ERROR (Status) || PartBlk == NULL) {
-        AsciiStrnCpyS (CmpHex, sizeof (CmpHex), "n/a", sizeof (CmpHex) - 1);
         RowStatus = "n/a";
       } else {
         PartSize  = GetPartitionSize (PartBlk);
@@ -5526,23 +5516,18 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
                     & ~(PartBlk->Media->BlockSize - 1);
         PartBuf = AllocatePool (ReadBytes);
         if (PartBuf == NULL) {
-          AsciiStrnCpyS (CmpHex, sizeof (CmpHex), "error", sizeof (CmpHex) - 1);
           RowStatus = "error";
         } else {
           Status = PartBlk->ReadBlocks (PartBlk, PartBlk->Media->MediaId,
                                         0, ReadBytes, PartBuf);
           if (EFI_ERROR (Status)) {
             FreePool (PartBuf);
-            AsciiStrnCpyS (CmpHex, sizeof (CmpHex), "error", sizeof (CmpHex) - 1);
             RowStatus = "error";
           } else {
             avb_sha256_init (&Ctx);
             avb_sha256_update (&Ctx, PartBuf, (UINT32)PartSize);
             Computed = avb_sha256_final (&Ctx);
             FreePool (PartBuf);
-
-            GblVbmetaHexDump (Computed, GBL_VBMETA_SHA256_LEN,
-                              CmpHex, sizeof (CmpHex));
 
             if (DigestLen != GBL_VBMETA_SHA256_LEN ||
                 CompareMem (Computed, Digest, GBL_VBMETA_SHA256_LEN) != 0)
@@ -5553,17 +5538,15 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
         }
       }
 
-      AsciiSPrint (Line, sizeof (Line),
-                   "%-16a %-13a %-65a %-65a %a",
-                   PartName, "hash", ExpHex, CmpHex, RowStatus);
-      GblFastbootInfoLong (Line);
+      AsciiSPrint (Line, sizeof (Line), "%-15a %-13a %a",
+                   PartName, DescType, RowStatus);
+      FastbootInfo (Line);
+      WaitForTransferComplete ();
       continue;
     }
 
     /* ---- chain descriptor ----------------------------------------------- */
     if (Type == GblPartDescChain) {
-      CHAR8                  PubHex[65];  /* first 32 bytes of pubkey = 64 hex + NUL */
-      CONST CHAR8           *RowStatus;
       EFI_BLOCK_IO_PROTOCOL *PartBlk  = NULL;
       EFI_HANDLE            *PartHdl  = NULL;
       CHAR16                 PartResolved[MAX_GPT_NAME_SIZE];
@@ -5571,17 +5554,9 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
       UINT64                 PartSize = 0;
       UINT64                 ReadBytes;
       GBL_AVB_FOOTER         ChainFooter;
-      UINT32                 DumpLen;
 
-      /* Expected: first 32 bytes of pubkey (truncated representation) */
-      if (PubKey != NULL && PubKeyLen > 0) {
-        DumpLen = (PubKeyLen < 32) ? PubKeyLen : 32;
-        GblVbmetaHexDump (PubKey, DumpLen, PubHex, sizeof (PubHex));
-      } else {
-        AsciiStrnCpyS (PubHex, sizeof (PubHex), "n/a", sizeof (PubHex) - 1);
-      }
+      DescType = "chain";
 
-      /* Computed: check partition's own AVB footer */
       Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
                                         PartResolved, ARRAY_SIZE (PartResolved));
       if (EFI_ERROR (Status) || PartBlk == NULL) {
@@ -5609,21 +5584,25 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
         }
       }
 
-      AsciiSPrint (Line, sizeof (Line),
-                   "%-16a %-13a %-65a %-65a %a",
-                   PartName, "chain", PubHex, "(footer)", RowStatus);
-      GblFastbootInfoLong (Line);
+      AsciiSPrint (Line, sizeof (Line), "%-15a %-13a %a",
+                   PartName, DescType, RowStatus);
+      FastbootInfo (Line);
+      WaitForTransferComplete ();
       continue;
     }
 
     /* ---- unsupported descriptor type (e.g. hashtree) ------------------- */
-    AsciiSPrint (Line, sizeof (Line),
-                 "%-16a %-13a %-65a %-65a %a",
-                 PartName, "unknown", "-", "-", "unknown");
-    GblFastbootInfoLong (Line);
+    AsciiSPrint (Line, sizeof (Line), "%-15a %-13a %a",
+                 PartName, "unknown", "unknown");
+    FastbootInfo (Line);
+    WaitForTransferComplete ();
   }
 
-  /* ---- summary: vbmeta SHA-256 digest ---------------------------------- */
+  /* ---- blank separator before summary ----------------------------------- */
+  FastbootInfo ("");
+  WaitForTransferComplete ();
+
+  /* ---- summary: vbmeta SHA-256 digest (64 hex chars, use chunking) ------ */
   {
     GBL_AvbSHA256Ctx  Ctx;
     UINT8            *Digest;
@@ -5634,9 +5613,7 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
     Digest = avb_sha256_final (&Ctx);
     GblVbmetaHexDump (Digest, GBL_VBMETA_SHA256_LEN, DigestHex, sizeof (DigestHex));
 
-    AsciiSPrint (Line, sizeof (Line),
-                 "%-16a %-13a %a",
-                 "vbmeta digest", "sha256", DigestHex);
+    AsciiSPrint (Line, sizeof (Line), "vbmeta digest:  %a", DigestHex);
     GblFastbootInfoLong (Line);
   }
 
@@ -5645,10 +5622,10 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
     GBL_AVB_VBMETA_HEADER  Hdr;
 
     if (!EFI_ERROR (AvbParse_VbmetaHeader (VbmBuf, VbmSize, &Hdr))) {
-      AsciiSPrint (Line, sizeof (Line),
-                   "%-16a %-13a 0x%08x",
-                   "vbmeta flags", "raw", (UINT32)Hdr.Flags);
-      GblFastbootInfoLong (Line);
+      AsciiSPrint (Line, sizeof (Line), "vbmeta flags:   0x%08x",
+                   (UINT32)Hdr.Flags);
+      FastbootInfo (Line);
+      WaitForTransferComplete ();
     }
   }
 
