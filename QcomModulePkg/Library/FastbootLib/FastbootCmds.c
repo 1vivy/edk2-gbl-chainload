@@ -4343,17 +4343,27 @@ CmdOemBootEfi (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
     return;
   }
 
-  /* Tell the host the boot is launching, then transfer control. We do
-   * NOT call FastbootOkay here because StartImage does not return on
-   * success. If it does return, we'll respond after with the failure. */
-  FastbootInfo ("starting staged image…");
+  /* Reply OKAY before handing off so the host's fastboot terminates
+   * cleanly.  StartImage does not return on a successful boot — control
+   * transfers to the staged image permanently.  If it does return (image
+   * exited back to UEFI), the rc is logged to ConOut for after-the-fact
+   * triage; the host has already moved on and must not receive a second
+   * OKAY/FAIL reply. */
+  FastbootOkay ("started");
+  WaitForTransferComplete ();
 
   Status = gBS->StartImage (ImageHandle, NULL, NULL);
 
-  /* Only reachable on failure or unusual return from a non-bootloader EFI. */
-  AsciiSPrint (Resp, sizeof (Resp),
-               "StartImage returned %r (image returned to caller)", Status);
-  FastbootFail (Resp);
+  /* Only reachable if the staged image returned to its caller rather than
+   * chainloading another OS.  Log the rc — do NOT call FastbootOkay/Fail
+   * again; the host already saw OKAY above. */
+  {
+    CHAR8 LogLine[160];
+    AsciiSPrint (LogLine, sizeof (LogLine),
+                 "oem boot-efi: StartImage returned %r (image exited back to UEFI)\n",
+                 Status);
+    Print (L"%a", LogLine);
+  }
 }
 
 #if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
