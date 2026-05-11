@@ -5753,23 +5753,52 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
   FastbootPublishVar ("serialno", StrSerialNum);
   FastbootPublishVar ("secure", IsSecureBootEnabled () ? "yes" : "no");
 
-  /* gbl-chainload boot-mode getvar: exposes the GBL_MODE this FastbootLib
-     was built with. Used by scripts/test-device-automatic.sh to confirm we
-     landed in our FastbootLib (not stock) and identify the mode. */
+  /* gbl-chainload build info getvars. `mode` exposes the GBL_MODE this
+     FastbootLib was built with — used by scripts/test-device-automatic.sh
+     to confirm we're in our FastbootLib (vs stock) and identify the mode.
+     `build-date` and `build-flags` are informational. `boot-mode` is
+     deliberately NOT used here — that name is reserved for the actual
+     Android boot signal (bootloader/system/recovery). */
 #ifdef GBL_MODE
 #if (GBL_MODE == 0)
-  FastbootPublishVar ("boot-mode", "gbl-mode-0");
+  FastbootPublishVar ("mode", "gbl-mode-0");
 #elif (GBL_MODE == 1)
-  FastbootPublishVar ("boot-mode", "gbl-mode-1");
+  FastbootPublishVar ("mode", "gbl-mode-1");
 #elif (GBL_MODE == 2)
-  FastbootPublishVar ("boot-mode", "gbl-mode-2");
+  FastbootPublishVar ("mode", "gbl-mode-2");
 #elif (GBL_MODE == 3)
-  FastbootPublishVar ("boot-mode", "gbl-mode-3");
+  FastbootPublishVar ("mode", "gbl-mode-3");
 #else
-  FastbootPublishVar ("boot-mode", "gbl-mode-unknown");
+  FastbootPublishVar ("mode", "gbl-mode-unknown");
 #endif
 #else
-  FastbootPublishVar ("boot-mode", "gbl-mode-undef");
+  FastbootPublishVar ("mode", "gbl-mode-undef");
+#endif
+
+  FastbootPublishVar ("build-date", __DATE__ " " __TIME__);
+
+#if defined (GBL_AUTO) || defined (GBL_DEBUG) || defined (GBL_VERBOSE)
+  {
+    STATIC CHAR8 BuildFlags[64];
+    AsciiSPrint (BuildFlags, sizeof (BuildFlags), "auto=%a debug=%a verbose=%a",
+#ifdef GBL_AUTO
+                 (GBL_AUTO ? "1" : "0"),
+#else
+                 "0",
+#endif
+#ifdef GBL_DEBUG
+                 (GBL_DEBUG ? "1" : "0"),
+#else
+                 "0",
+#endif
+#ifdef GBL_VERBOSE
+                 (GBL_VERBOSE ? "1" : "0")
+#else
+                 "0"
+#endif
+    );
+    FastbootPublishVar ("build-flags", BuildFlags);
+  }
 #endif
 
   if (MultiSlotBoot) {
