@@ -5753,53 +5753,17 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
   FastbootPublishVar ("serialno", StrSerialNum);
   FastbootPublishVar ("secure", IsSecureBootEnabled () ? "yes" : "no");
 
-  /* gbl-chainload build info getvars. `mode` exposes the GBL_MODE this
-     FastbootLib was built with — used by scripts/test-device-automatic.sh
-     to confirm we're in our FastbootLib (vs stock) and identify the mode.
-     `build-date` and `build-flags` are informational. `boot-mode` is
-     deliberately NOT used here — that name is reserved for the actual
+  /* gbl-chainload build info. Single source of truth: GBL_BUILD_NAME is
+     defined in GblChainloadPkg.dsc and substituted in by build-inside-docker.sh
+     (e.g. "mode-1-auto-debug-verbose"). Same string is in the log banner
+     and FastbootMenu display, so on-device, on-screen, and host views all
+     match. `boot-mode` is deliberately NOT used — reserved for the actual
      Android boot signal (bootloader/system/recovery). */
-#ifdef GBL_MODE
-#if (GBL_MODE == 0)
-  FastbootPublishVar ("mode", "gbl-mode-0");
-#elif (GBL_MODE == 1)
-  FastbootPublishVar ("mode", "gbl-mode-1");
-#elif (GBL_MODE == 2)
-  FastbootPublishVar ("mode", "gbl-mode-2");
-#elif (GBL_MODE == 3)
-  FastbootPublishVar ("mode", "gbl-mode-3");
-#else
-  FastbootPublishVar ("mode", "gbl-mode-unknown");
+#ifndef GBL_BUILD_NAME
+# define GBL_BUILD_NAME  "mode-unknown"
 #endif
-#else
-  FastbootPublishVar ("mode", "gbl-mode-undef");
-#endif
-
+  FastbootPublishVar ("build-name", GBL_BUILD_NAME);
   FastbootPublishVar ("build-date", __DATE__ " " __TIME__);
-
-#if defined (GBL_AUTO) || defined (GBL_DEBUG) || defined (GBL_VERBOSE)
-  {
-    STATIC CHAR8 BuildFlags[64];
-    AsciiSPrint (BuildFlags, sizeof (BuildFlags), "auto=%a debug=%a verbose=%a",
-#ifdef GBL_AUTO
-                 (GBL_AUTO ? "1" : "0"),
-#else
-                 "0",
-#endif
-#ifdef GBL_DEBUG
-                 (GBL_DEBUG ? "1" : "0"),
-#else
-                 "0",
-#endif
-#ifdef GBL_VERBOSE
-                 (GBL_VERBOSE ? "1" : "0")
-#else
-                 "0"
-#endif
-    );
-    FastbootPublishVar ("build-flags", BuildFlags);
-  }
-#endif
 
   if (MultiSlotBoot) {
     /*Find ActiveSlot, bydefault _a will be the active slot

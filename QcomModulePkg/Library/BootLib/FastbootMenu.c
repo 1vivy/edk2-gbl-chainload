@@ -81,20 +81,8 @@
 
 STATIC OPTION_MENU_INFO gMenuInfo;
 
-#ifndef GBL_MODE
-# define GBL_MODE 0
-#endif
-
-#if (GBL_MODE == 0)
-# define GBL_CHAINLOAD_MODE  "mode-0"
-#elif (GBL_MODE == 1)
-# define GBL_CHAINLOAD_MODE  "mode-1"
-#elif (GBL_MODE == 2)
-# define GBL_CHAINLOAD_MODE  "mode-2"
-#elif (GBL_MODE == 3)
-# define GBL_CHAINLOAD_MODE  "mode-3"
-#else
-# define GBL_CHAINLOAD_MODE  "unknown-mode"
+#ifndef GBL_BUILD_NAME
+# define GBL_BUILD_NAME  "mode-unknown"
 #endif
 
 #ifndef GBL_AUTO
@@ -261,7 +249,7 @@ STATIC MENU_MSG_INFO mFastbootCommonMsgInfo[] = {
      COMMON,
      0,
      NOACTION},
-    {{"MODE - " GBL_CHAINLOAD_MODE},
+    {{"BUILD - " GBL_BUILD_NAME},
      COMMON_FACTOR,
      BGR_GREEN,
      BGR_BLACK,
