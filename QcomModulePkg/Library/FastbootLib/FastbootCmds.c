@@ -4510,41 +4510,66 @@ UINT8 *avb_sha256_final  (VOID *ctx);
 #define GBL_VBMETA_SHA256_LEN  GBL_AVB_SHA256_DIGEST_SIZE
 #define GBL_VBMETA_HEX_LEN    65   /* 32*2 + NUL */
 
+/* Descriptor type tag for vbmeta lookup helpers (defined below). */
+typedef enum {
+  GblPartDescNone  = 0,
+  GblPartDescHash  = 1,
+  GblPartDescChain = 2,
+} GBL_PART_DESC_TYPE;
+
+/* Forward decls — implementations are below the synthesize function. */
+STATIC EFI_STATUS
+GblVbmetaReadActiveSlot (
+  OUT UINT8                  **BufOut,
+  OUT UINT64                  *SizeOut
+  );
+
+STATIC EFI_STATUS
+GblVbmetaLookupDescriptor (
+  IN  CONST UINT8            *VbmBuf,
+  IN  UINT64                  VbmSize,
+  IN  CONST CHAR8            *PartName,
+  OUT GBL_PART_DESC_TYPE     *TypeOut,
+  OUT CONST UINT8           **DigestOut,
+  OUT UINT32                 *DigestLenOut,
+  OUT CONST UINT8           **PubKeyOut,
+  OUT UINT32                 *PubKeyLenOut
+  );
+
 /* -------------------------------------------------------------------------
- * `oem synthesize-and-flash <partition> [unsigned] [commit]`
+ * `oem synthesize-and-flash <partition> [commit]`
  *
- * Takes the image staged via `fastboot stage`, computes its SHA-256, builds
- * an AVB0 vbmeta whose hash descriptor's expected_digest IS that SHA-256,
- * assembles
+ * Builds a fake-signed AVB0 vbmeta whose embedded AvbRSAPublicKey is the
+ * device's REAL OEM pubkey, extracted at runtime from the chain partition
+ * descriptor in on-disk vbmeta_<active_slot>.  Hash descriptor's
+ * expected_digest = SHA-256 of the staged content.  Writes
  *   staged || zero-pad-to-4KiB || vbmeta (header+auth+aux) || zero-pad || AvbFooter
- * and writes it to the on-disk partition.  Dry-run by default; literal
- * "commit" enables the write.
+ * to the on-disk partition.  Dry-run by default; literal "commit" writes.
  *
- * Default mode (fake-signed SHA256_RSA2048):
- *   - algorithm_type = 1, auth block holds a real SHA-256 over (header||aux)
- *     and a zero signature (RSA verify must fail).
- *   - aux block holds the hash descriptor plus a 520-byte AvbRSAPublicKey
- *     blob (junk modulus) so libavb accepts the structure sizes.
- *   - libavb returns AVB_VBMETA_VERIFY_RESULT_SIGNATURE_MISMATCH for that
- *     vbmeta, which avb_slot_verify maps to ERROR_VERIFICATION (recoverable
- *     per result_should_continue).  patch10's AVE-bit force + return-OK
- *     rewrite then lets libavb continue and report success at the function
- *     boundary, but the per-vbmeta verify_result_local stays
- *     SIGNATURE_MISMATCH — the same state class that LKM-rooted init_boot
- *     produces and that boots cleanly under mode-1.
+ * Algorithm + auth/aux sizing is derived from the chain descriptor's
+ * pk_len so the encoding adapts to whatever OEM key size is in use:
+ *   pk_len=520  → SHA256_RSA2048 (sig=256, auth=320)
+ *   pk_len=1032 → SHA256_RSA4096 (sig=512, auth=576)
+ *   pk_len=2056 → SHA256_RSA8192 (sig=1024, auth=1088)
  *
- * `unsigned` keyword switches to algorithm_type=NONE (OK_NOT_SIGNED).  Kept
- * as an A/B comparison option; on-device this state has been observed to
- * NOT boot under mode-1 + patch10.
+ * libavb at parse time sees a stock-shaped vbmeta:
+ *   - sizes valid, 64-byte aligned
+ *   - algorithm_type matches what stock recovery uses
+ *   - auth.hash = real SHA256(header || aux), so HASH_MISMATCH not hit
+ *   - signature is zero → RSA verify fails → SIGNATURE_MISMATCH
+ *   - chain-pubkey callback finds our pubkey bytes MATCH chain desc's
+ *     expected bytes (we copied them) → no PUBLIC_KEY_REJECTED
+ *
+ * SIGNATURE_MISMATCH propagates as AVB_SLOT_VERIFY_RESULT_ERROR_VERIFICATION
+ * (recoverable per result_should_continue).  patch10 catches it.
  *
  * No partition whitelist — user picks the partition; the host-side fastboot
  * non-HLOS safety hook gates abuse.  Replaces the prior `oem graft-and-flash`.
  *
  * Workflow:
  *   fastboot stage <new-image>.img
- *   fastboot oem synthesize-and-flash recovery                    # dry-run, signed
- *   fastboot oem synthesize-and-flash recovery commit             # signed write
- *   fastboot oem synthesize-and-flash recovery unsigned commit    # unsigned A/B
+ *   fastboot oem synthesize-and-flash recovery           # dry-run
+ *   fastboot oem synthesize-and-flash recovery commit    # write
  * ------------------------------------------------------------------------- */
 
 STATIC VOID
@@ -4569,11 +4594,9 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   EFI_STATUS              Status;
   CHAR8                   Resp[256];
   CHAR8                   PartName[MAX_GPT_NAME_SIZE];
-  CHAR8                   TokBuf[32];
   CONST CHAR8            *ArgPtr;
   CONST CHAR8            *Rest;
   BOOLEAN                 DoCommit  = FALSE;
-  BOOLEAN                 Unsigned  = FALSE;
 
   EFI_BLOCK_IO_PROTOCOL  *BlockIo   = NULL;
   EFI_HANDLE             *Handle    = NULL;
@@ -4583,16 +4606,28 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   UINT8                  *Assembly  = NULL;
   UINT64                  StagedSize;
   UINT32                  NameLen;
-  UINT32                  TokLen;
 
   GBL_AvbSHA256Ctx        Ctx;
   UINT8                  *DigestPtr;
   UINT8                   ContentDigest[GBL_AVB_SHA256_DIGEST_SIZE];
 
+  /* On-device vbmeta + chain pubkey extraction. */
+  UINT8                  *VbmBuf   = NULL;
+  UINT64                  VbmSize  = 0;
+  GBL_PART_DESC_TYPE      DescType;
+  CONST UINT8            *DescDigest = NULL;
+  UINT32                  DescDigestLen = 0;
+  CONST UINT8            *ChainPubKey  = NULL;
+  UINT32                  ChainPubKeyLen = 0;
+  UINT32                  ChainKeyBits   = 0;
+  CONST CHAR8            *AlgoName;
+
   UINT64                  DescUnpaddedLen, DescPad, DescSize;
   UINT64                  AuxUnpad, AuxPad, AuxSize;
   UINT64                  AuthUnpad, AuthPad, AuthSize;
   UINT64                  PkOffset, PkSize;
+  UINT32                  AlgorithmType;
+  UINT64                  SigSize;
   UINT64                  VbmetaSize, VbmetaOffset;
   UINT64                  AuxOffsetInVbmeta;
   UINT8                  *Vp;          /* vbmeta header (256 B) */
@@ -4601,14 +4636,11 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   UINT8                  *Dp;          /* hash descriptor (at aux+0) */
   UINT8                  *Kp;          /* pubkey blob (at aux+PkOffset) */
   UINT8                  *Fp;          /* footer */
-  CONST CHAR8            *Release   = "gbl-synthesize 1.1";
+  CONST CHAR8            *Release   = "gbl-synthesize 1.2";
   CONST CHAR8            *HashAlgo  = "sha256";
   UINT32                  RelLen;
 
-  /* SHA256_RSA2048 fixed sizes (fake-signed mode). */
-  CONST UINT64 GBL_SYNTH_HASH_LEN   = GBL_AVB_SHA256_DIGEST_SIZE;       /* 32  */
-  CONST UINT64 GBL_SYNTH_SIG_LEN    = 256;                              /* RSA-2048 */
-  CONST UINT64 GBL_SYNTH_PUBKEY_LEN = 4U + 4U + 256U + 256U;            /* 520 */
+  CONST UINT64 GBL_SYNTH_HASH_LEN   = GBL_AVB_SHA256_DIGEST_SIZE;       /* 32 */
   CONST UINT64 GBL_AVB_BLOCK_ALIGN  = 64;
 
   /* ---- exchange staging buffer ---- */
@@ -4619,7 +4651,7 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   }
   StagedSize = mFlashNumDataBytes;
 
-  /* ---- parse args: "<partition> [unsigned] [commit]" (latter two any order) ---- */
+  /* ---- parse args: "<partition> [commit]" ---- */
   ArgPtr = Arg;
   while (*ArgPtr == ' ') ArgPtr++;
 
@@ -4629,35 +4661,23 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
     NameLen++;
   }
   if (NameLen == 0) {
-    FastbootFail ("usage: oem synthesize-and-flash <partition> [unsigned] [commit]");
+    FastbootFail ("usage: oem synthesize-and-flash <partition> [commit]");
     return;
   }
   AsciiStrnCpyS (PartName, sizeof (PartName), ArgPtr, NameLen);
 
   Rest = ArgPtr + NameLen;
-  while (*Rest != '\0') {
-    while (*Rest == ' ') Rest++;
-    if (*Rest == '\0') break;
-    TokLen = 0;
-    while (Rest[TokLen] != '\0' && Rest[TokLen] != ' ' &&
-           TokLen < sizeof (TokBuf) - 1) {
-      TokLen++;
-    }
-    AsciiStrnCpyS (TokBuf, sizeof (TokBuf), Rest, TokLen);
-    if (AsciiStrCmp (TokBuf, "commit") == 0) {
-      DoCommit = TRUE;
-    } else if (AsciiStrCmp (TokBuf, "unsigned") == 0) {
-      Unsigned = TRUE;
-    } else {
-      AsciiSPrint (Resp, sizeof (Resp),
-                   "unknown token '%a' (expected 'unsigned' or 'commit')", TokBuf);
-      FastbootFail (Resp);
-      return;
-    }
-    Rest += TokLen;
+  while (*Rest == ' ') Rest++;
+  if (AsciiStrCmp (Rest, "commit") == 0) {
+    DoCommit = TRUE;
+  } else if (*Rest != '\0') {
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "unknown trailing token (expected 'commit' or empty)");
+    FastbootFail (Resp);
+    return;
   }
 
-  /* ---- locate partition ---- */
+  /* ---- locate target partition ---- */
   Status = LocatePartition (PartName, &BlockIo, &Handle,
                             ResolvedName, ARRAY_SIZE (ResolvedName));
   if (EFI_ERROR (Status) || BlockIo == NULL) {
@@ -4673,30 +4693,73 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
     return;
   }
 
+  /* ---- read on-device vbmeta_<slot>, find chain desc for target,
+   * extract OEM pubkey ---- */
+  Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
+  if (EFI_ERROR (Status)) {
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "could not read vbmeta_<slot>: %r", Status);
+    FastbootFail (Resp);
+    return;
+  }
+
+  Status = GblVbmetaLookupDescriptor (VbmBuf, VbmSize, PartName,
+                                      &DescType, &DescDigest, &DescDigestLen,
+                                      &ChainPubKey, &ChainPubKeyLen);
+  if (EFI_ERROR (Status) || DescType != GblPartDescChain ||
+      ChainPubKey == NULL || ChainPubKeyLen == 0) {
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "no chain partition descriptor for '%a' in vbmeta_<slot>", PartName);
+    FastbootFail (Resp);
+    FreePool (VbmBuf);
+    return;
+  }
+
+  /* Derive algorithm + signature size from the chain descriptor's pk_len.
+   *   pk_len = 8 + 2 * (key_num_bits/8) → derived (algorithm, sig_size).
+   */
+  switch (ChainPubKeyLen) {
+  case 520:                                       /* 4 + 4 + 256 + 256 */
+    AlgorithmType = 1;                            /* SHA256_RSA2048 */
+    SigSize       = 256;
+    ChainKeyBits  = 2048;
+    AlgoName      = "SHA256_RSA2048";
+    break;
+  case 1032:                                      /* 4 + 4 + 512 + 512 */
+    AlgorithmType = 2;                            /* SHA256_RSA4096 */
+    SigSize       = 512;
+    ChainKeyBits  = 4096;
+    AlgoName      = "SHA256_RSA4096";
+    break;
+  case 2056:                                      /* 4 + 4 + 1024 + 1024 */
+    AlgorithmType = 3;                            /* SHA256_RSA8192 */
+    SigSize       = 1024;
+    ChainKeyBits  = 8192;
+    AlgoName      = "SHA256_RSA8192";
+    break;
+  default:
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "unsupported chain pk_len=%u for '%a' (expected 520/1032/2056)",
+                 ChainPubKeyLen, PartName);
+    FastbootFail (Resp);
+    FreePool (VbmBuf);
+    return;
+  }
+
   /* ---- compute layout sizes ----
    *   Hash descriptor: 16 (parent) + 116 (body) + NameLen + 32 (digest), 8-padded.
-   *   Aux block:
-   *     unsigned: descriptor only, 64-aligned.
-   *     signed  : descriptor + 520B AvbRSAPublicKey, 64-aligned.
-   *   Auth block:
-   *     unsigned: 0  (auth_size=0 is trivially 64-aligned).
-   *     signed  : hash(32) + sig(256) = 288, 64-aligned → 320.
+   *   Aux block:  descriptor + AvbRSAPublicKey, 64-aligned.
+   *   Auth block: hash(32) + sig(SigSize), 64-aligned.
    */
   DescUnpaddedLen = 16U + 116U + (UINT64)NameLen + GBL_SYNTH_HASH_LEN;
   DescPad         = (0ULL - DescUnpaddedLen) & 7ULL;
   DescSize        = DescUnpaddedLen + DescPad;
 
-  if (Unsigned) {
-    PkOffset  = 0;
-    PkSize    = 0;
-    AuxUnpad  = DescSize;
-    AuthUnpad = 0;
-  } else {
-    PkOffset  = DescSize;
-    PkSize    = GBL_SYNTH_PUBKEY_LEN;
-    AuxUnpad  = DescSize + GBL_SYNTH_PUBKEY_LEN;
-    AuthUnpad = GBL_SYNTH_HASH_LEN + GBL_SYNTH_SIG_LEN;
-  }
+  PkOffset  = DescSize;
+  PkSize    = ChainPubKeyLen;
+  AuxUnpad  = DescSize + (UINT64)ChainPubKeyLen;
+  AuthUnpad = GBL_SYNTH_HASH_LEN + SigSize;
+
   AuxPad  = (0ULL - AuxUnpad)  & (GBL_AVB_BLOCK_ALIGN - 1ULL);
   AuxSize = AuxUnpad + AuxPad;
   AuthPad = (0ULL - AuthUnpad) & (GBL_AVB_BLOCK_ALIGN - 1ULL);
@@ -4711,6 +4774,7 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
                  "partition too small: image=%llu + pad + vbmeta=%llu + footer=64 > %llu",
                  StagedSize, VbmetaSize, PartSize);
     FastbootFail (Resp);
+    FreePool (VbmBuf);
     return;
   }
 
@@ -4722,10 +4786,14 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 
   /* ---- info ---- */
   AsciiSPrint (Resp, sizeof (Resp),
-               "target part=%llu B  staged=%llu B  vbm_off=%llu  vbm_size=%llu  mode=%a",
-               PartSize, StagedSize, VbmetaOffset, VbmetaSize,
-               Unsigned ? "unsigned (OK_NOT_SIGNED)"
-                        : "fake-signed RSA-2048 (SIGNATURE_MISMATCH)");
+               "target=%a part=%llu B  staged=%llu B  algo=%a (RSA-%u)",
+               PartName, PartSize, StagedSize, AlgoName, ChainKeyBits);
+  FastbootInfo (Resp);
+  WaitForTransferComplete ();
+
+  AsciiSPrint (Resp, sizeof (Resp),
+               "vbm_off=%llu vbm_sz=%llu auth=%llu aux=%llu pk=%u",
+               VbmetaOffset, VbmetaSize, AuthSize, AuxSize, ChainPubKeyLen);
   FastbootInfo (Resp);
   WaitForTransferComplete ();
 
@@ -4736,9 +4804,19 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   FastbootInfo (Resp);
   WaitForTransferComplete ();
 
+  AsciiSPrint (Resp, sizeof (Resp),
+               "OEM pubkey %02x%02x%02x%02x...%02x%02x%02x%02x (from vbmeta chain[%a])",
+               ChainPubKey[8],  ChainPubKey[9],  ChainPubKey[10], ChainPubKey[11],
+               ChainPubKey[8 + (ChainKeyBits / 8) - 4], ChainPubKey[8 + (ChainKeyBits / 8) - 3],
+               ChainPubKey[8 + (ChainKeyBits / 8) - 2], ChainPubKey[8 + (ChainKeyBits / 8) - 1],
+               PartName);
+  FastbootInfo (Resp);
+  WaitForTransferComplete ();
+
   if (!DoCommit) {
     FastbootInfo ("DRY RUN -- re-issue with 'commit' to write");
     WaitForTransferComplete ();
+    FreePool (VbmBuf);
     FastbootOkay ("");
     return;
   }
@@ -4747,6 +4825,7 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   Assembly = AllocateZeroPool (PartSize);
   if (Assembly == NULL) {
     FastbootFail ("AllocateZeroPool failed for partition-sized buffer");
+    FreePool (VbmBuf);
     return;
   }
 
@@ -4763,11 +4842,11 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   SynthBe32 (Vp + 0x08, 0);                                       /* required_libavb_version_minor */
   SynthBe64 (Vp + 0x0C, AuthSize);                                /* authentication_data_block_size */
   SynthBe64 (Vp + 0x14, AuxSize);                                 /* auxiliary_data_block_size */
-  SynthBe32 (Vp + 0x1C, Unsigned ? 0U : 1U);                      /* algorithm_type */
+  SynthBe32 (Vp + 0x1C, AlgorithmType);                           /* algorithm_type */
   SynthBe64 (Vp + 0x20, 0);                                       /* hash_offset (in auth) */
-  SynthBe64 (Vp + 0x28, Unsigned ? 0ULL : GBL_SYNTH_HASH_LEN);    /* hash_size */
-  SynthBe64 (Vp + 0x30, Unsigned ? 0ULL : GBL_SYNTH_HASH_LEN);    /* signature_offset (in auth) */
-  SynthBe64 (Vp + 0x38, Unsigned ? 0ULL : GBL_SYNTH_SIG_LEN);     /* signature_size */
+  SynthBe64 (Vp + 0x28, GBL_SYNTH_HASH_LEN);                      /* hash_size */
+  SynthBe64 (Vp + 0x30, GBL_SYNTH_HASH_LEN);                      /* signature_offset (in auth) */
+  SynthBe64 (Vp + 0x38, SigSize);                                 /* signature_size */
   SynthBe64 (Vp + 0x40, PkOffset);                                /* public_key_offset (in aux) */
   SynthBe64 (Vp + 0x48, PkSize);                                  /* public_key_size */
   /* public_key_metadata @ 0x50/0x58 — zero from AllocateZeroPool */
@@ -4795,22 +4874,21 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   CopyMem (Dp + 132U,           PartName,      NameLen);
   CopyMem (Dp + 132U + NameLen, ContentDigest, GBL_AVB_SHA256_DIGEST_SIZE);
 
-  if (!Unsigned) {
-    /* ---- aux block: AvbRSAPublicKey at PkOffset (junk modulus) ---- */
-    Kp = Xp + PkOffset;
-    SynthBe32 (Kp + 0x00, 2048);                                  /* key_num_bits */
-    SynthBe32 (Kp + 0x04, 0);                                     /* n0inv */
-    SetMem    (Kp + 0x08, 256, 0xFF);                             /* N modulus — large non-zero */
-    /* RR @ Kp + 0x08 + 256 — zero from AllocateZeroPool */
+  /* ---- aux block: copy real OEM AvbRSAPublicKey at PkOffset ---- */
+  Kp = Xp + PkOffset;
+  CopyMem (Kp, ChainPubKey, ChainPubKeyLen);
 
-    /* ---- auth block: hash = SHA256(header || aux); signature = zeros ---- */
-    avb_sha256_init   (&Ctx);
-    avb_sha256_update (&Ctx, Vp, (UINT32)GBL_AVB_VBMETA_HEADER_SIZE);
-    avb_sha256_update (&Ctx, Xp, (UINT32)AuxSize);
-    DigestPtr = avb_sha256_final (&Ctx);
-    CopyMem (Ap, DigestPtr, GBL_SYNTH_HASH_LEN);
-    /* signature[256] + padding — zero from AllocateZeroPool (RSA verify will fail) */
-  }
+  /* ---- auth block: hash = SHA256(header || aux); signature = zeros ----
+   * Real hash so libavb's HASH path matches; zero signature so RSA verify
+   * fails with SIGNATURE_MISMATCH.  Chain-pubkey callback finds our pubkey
+   * matches the chain descriptor's expected bytes → no PUBLIC_KEY_REJECTED.
+   */
+  avb_sha256_init   (&Ctx);
+  avb_sha256_update (&Ctx, Vp, (UINT32)GBL_AVB_VBMETA_HEADER_SIZE);
+  avb_sha256_update (&Ctx, Xp, (UINT32)AuxSize);
+  DigestPtr = avb_sha256_final (&Ctx);
+  CopyMem (Ap, DigestPtr, GBL_SYNTH_HASH_LEN);
+  /* signature[SigSize] + padding — zero from AllocateZeroPool */
 
   /* ---- AvbFooter (last 64 B) ---- */
   Fp = Assembly + PartSize - GBL_AVB_FOOTER_SIZE;
@@ -4820,6 +4898,10 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   SynthBe64 (Fp + 0x0C,  StagedSize);
   SynthBe64 (Fp + 0x14,  VbmetaOffset);
   SynthBe64 (Fp + 0x1C,  VbmetaSize);
+
+  /* VbmBuf no longer needed — ChainPubKey was copied above. */
+  FreePool (VbmBuf);
+  VbmBuf = NULL;
 
   /* ---- write to partition ---- */
   Status = WriteBlockToPartition (BlockIo, Handle, 0, PartSize, Assembly);
@@ -4833,17 +4915,11 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 
   AsciiSPrint (Resp, sizeof (Resp),
                "synthesized %s: wrote %llu B (image=%llu B, vbmeta @ %llu B, %a)",
-               ResolvedName, PartSize, StagedSize, VbmetaOffset,
-               Unsigned ? "OK_NOT_SIGNED" : "SIGNATURE_MISMATCH");
+               ResolvedName, PartSize, StagedSize, VbmetaOffset, AlgoName);
   FastbootOkay (Resp);
 }
 
-/* Descriptor type tags seen in the walk */
-typedef enum {
-  GblPartDescNone  = 0,
-  GblPartDescHash  = 1,
-  GblPartDescChain = 2,
-} GBL_PART_DESC_TYPE;
+/* GBL_PART_DESC_TYPE is forward-declared above the synthesize block. */
 
 /*
  * GblFastbootInfoLong — emit Value across one or more FastbootInfo packets.
