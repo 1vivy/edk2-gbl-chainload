@@ -4511,28 +4511,40 @@ UINT8 *avb_sha256_final  (VOID *ctx);
 #define GBL_VBMETA_HEX_LEN    65   /* 32*2 + NUL */
 
 /* -------------------------------------------------------------------------
- * `oem synthesize-and-flash <partition> [commit]`
+ * `oem synthesize-and-flash <partition> [unsigned] [commit]`
  *
  * Takes the image staged via `fastboot stage`, computes its SHA-256, builds
- * an unsigned AVB0 vbmeta image whose hash descriptor's expected_digest IS
- * that SHA-256, assembles a partition-sized buffer
- *   staged_content || zero-pad-to-4KiB || vbmeta_image || zero-pad || AvbFooter
- * and writes it back to the on-disk partition.  Dry-run by default; the
- * literal word "commit" enables the write.
+ * an AVB0 vbmeta whose hash descriptor's expected_digest IS that SHA-256,
+ * assembles
+ *   staged || zero-pad-to-4KiB || vbmeta (header+auth+aux) || zero-pad || AvbFooter
+ * and writes it to the on-disk partition.  Dry-run by default; literal
+ * "commit" enables the write.
  *
- * libavb parses the result as AVB_VBMETA_VERIFY_RESULT_OK_NOT_SIGNED, which
- * patch10's force-AVB-success rewrite tolerates inside avb_slot_verify.
- * Userspace libfs_avb then re-hashes the on-disk vbmeta and confirms it
- * matches the cmdline claim — both derived from the same bytes written here.
+ * Default mode (fake-signed SHA256_RSA2048):
+ *   - algorithm_type = 1, auth block holds a real SHA-256 over (header||aux)
+ *     and a zero signature (RSA verify must fail).
+ *   - aux block holds the hash descriptor plus a 520-byte AvbRSAPublicKey
+ *     blob (junk modulus) so libavb accepts the structure sizes.
+ *   - libavb returns AVB_VBMETA_VERIFY_RESULT_SIGNATURE_MISMATCH for that
+ *     vbmeta, which avb_slot_verify maps to ERROR_VERIFICATION (recoverable
+ *     per result_should_continue).  patch10's AVE-bit force + return-OK
+ *     rewrite then lets libavb continue and report success at the function
+ *     boundary, but the per-vbmeta verify_result_local stays
+ *     SIGNATURE_MISMATCH — the same state class that LKM-rooted init_boot
+ *     produces and that boots cleanly under mode-1.
+ *
+ * `unsigned` keyword switches to algorithm_type=NONE (OK_NOT_SIGNED).  Kept
+ * as an A/B comparison option; on-device this state has been observed to
+ * NOT boot under mode-1 + patch10.
  *
  * No partition whitelist — user picks the partition; the host-side fastboot
- * non-HLOS safety hook gates abuse.  Replaces the prior `oem graft-and-flash`
- * (transplant from stock).
+ * non-HLOS safety hook gates abuse.  Replaces the prior `oem graft-and-flash`.
  *
  * Workflow:
  *   fastboot stage <new-image>.img
- *   fastboot oem synthesize-and-flash recovery          # dry-run
- *   fastboot oem synthesize-and-flash recovery commit   # live write
+ *   fastboot oem synthesize-and-flash recovery                    # dry-run, signed
+ *   fastboot oem synthesize-and-flash recovery commit             # signed write
+ *   fastboot oem synthesize-and-flash recovery unsigned commit    # unsigned A/B
  * ------------------------------------------------------------------------- */
 
 STATIC VOID
@@ -4557,33 +4569,49 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   EFI_STATUS              Status;
   CHAR8                   Resp[256];
   CHAR8                   PartName[MAX_GPT_NAME_SIZE];
+  CHAR8                   TokBuf[32];
   CONST CHAR8            *ArgPtr;
   CONST CHAR8            *Rest;
-  BOOLEAN                 DoCommit = FALSE;
+  BOOLEAN                 DoCommit  = FALSE;
+  BOOLEAN                 Unsigned  = FALSE;
 
-  EFI_BLOCK_IO_PROTOCOL  *BlockIo  = NULL;
-  EFI_HANDLE             *Handle   = NULL;
+  EFI_BLOCK_IO_PROTOCOL  *BlockIo   = NULL;
+  EFI_HANDLE             *Handle    = NULL;
   CHAR16                  ResolvedName[MAX_GPT_NAME_SIZE];
 
   UINT64                  PartSize  = 0;
   UINT8                  *Assembly  = NULL;
   UINT64                  StagedSize;
   UINT32                  NameLen;
+  UINT32                  TokLen;
 
   GBL_AvbSHA256Ctx        Ctx;
   UINT8                  *DigestPtr;
-  UINT8                   Digest[GBL_AVB_SHA256_DIGEST_SIZE];
+  UINT8                   ContentDigest[GBL_AVB_SHA256_DIGEST_SIZE];
 
-  UINT64                  DescUnpaddedLen, DescPad;
-  UINT64                  AuxSize, VbmetaSize, VbmetaOffset;
-  UINT8                  *Vp;
-  UINT8                  *Dp;
-  UINT8                  *Fp;
-  CONST CHAR8            *Release   = "gbl-synthesize 1.0";
+  UINT64                  DescUnpaddedLen, DescPad, DescSize;
+  UINT64                  AuxUnpad, AuxPad, AuxSize;
+  UINT64                  AuthUnpad, AuthPad, AuthSize;
+  UINT64                  PkOffset, PkSize;
+  UINT64                  VbmetaSize, VbmetaOffset;
+  UINT64                  AuxOffsetInVbmeta;
+  UINT8                  *Vp;          /* vbmeta header (256 B) */
+  UINT8                  *Ap;          /* auth block start */
+  UINT8                  *Xp;          /* aux block start */
+  UINT8                  *Dp;          /* hash descriptor (at aux+0) */
+  UINT8                  *Kp;          /* pubkey blob (at aux+PkOffset) */
+  UINT8                  *Fp;          /* footer */
+  CONST CHAR8            *Release   = "gbl-synthesize 1.1";
   CONST CHAR8            *HashAlgo  = "sha256";
   UINT32                  RelLen;
 
-  /* ---- exchange staging buffer (same as flash:/graft) ---- */
+  /* SHA256_RSA2048 fixed sizes (fake-signed mode). */
+  CONST UINT64 GBL_SYNTH_HASH_LEN   = GBL_AVB_SHA256_DIGEST_SIZE;       /* 32  */
+  CONST UINT64 GBL_SYNTH_SIG_LEN    = 256;                              /* RSA-2048 */
+  CONST UINT64 GBL_SYNTH_PUBKEY_LEN = 4U + 4U + 256U + 256U;            /* 520 */
+  CONST UINT64 GBL_AVB_BLOCK_ALIGN  = 64;
+
+  /* ---- exchange staging buffer ---- */
   ExchangeFlashAndUsbDataBuf ();
   if (mFlashDataBuffer == NULL || mFlashNumDataBytes == 0) {
     FastbootFail ("no staged image -- run `fastboot stage <file>` first");
@@ -4591,7 +4619,7 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   }
   StagedSize = mFlashNumDataBytes;
 
-  /* ---- parse args: "<partition> [commit]" ---- */
+  /* ---- parse args: "<partition> [unsigned] [commit]" (latter two any order) ---- */
   ArgPtr = Arg;
   while (*ArgPtr == ' ') ArgPtr++;
 
@@ -4601,15 +4629,32 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
     NameLen++;
   }
   if (NameLen == 0) {
-    FastbootFail ("usage: oem synthesize-and-flash <partition> [commit]");
+    FastbootFail ("usage: oem synthesize-and-flash <partition> [unsigned] [commit]");
     return;
   }
   AsciiStrnCpyS (PartName, sizeof (PartName), ArgPtr, NameLen);
 
   Rest = ArgPtr + NameLen;
-  while (*Rest == ' ') Rest++;
-  if (AsciiStrCmp (Rest, "commit") == 0) {
-    DoCommit = TRUE;
+  while (*Rest != '\0') {
+    while (*Rest == ' ') Rest++;
+    if (*Rest == '\0') break;
+    TokLen = 0;
+    while (Rest[TokLen] != '\0' && Rest[TokLen] != ' ' &&
+           TokLen < sizeof (TokBuf) - 1) {
+      TokLen++;
+    }
+    AsciiStrnCpyS (TokBuf, sizeof (TokBuf), Rest, TokLen);
+    if (AsciiStrCmp (TokBuf, "commit") == 0) {
+      DoCommit = TRUE;
+    } else if (AsciiStrCmp (TokBuf, "unsigned") == 0) {
+      Unsigned = TRUE;
+    } else {
+      AsciiSPrint (Resp, sizeof (Resp),
+                   "unknown token '%a' (expected 'unsigned' or 'commit')", TokBuf);
+      FastbootFail (Resp);
+      return;
+    }
+    Rest += TokLen;
   }
 
   /* ---- locate partition ---- */
@@ -4628,17 +4673,38 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
     return;
   }
 
-  /* ---- compute AVB layout sizes ----
-   *   AvbHashDescriptor: parent (16) + body (116) + name + salt(0) + digest(32),
-   *                      padded to 8-byte alignment.
-   *   AvbVBMetaImage:    header (256) + aux (= descriptor total).
-   *   AvbFooter:         trailing 64 bytes.
+  /* ---- compute layout sizes ----
+   *   Hash descriptor: 16 (parent) + 116 (body) + NameLen + 32 (digest), 8-padded.
+   *   Aux block:
+   *     unsigned: descriptor only, 64-aligned.
+   *     signed  : descriptor + 520B AvbRSAPublicKey, 64-aligned.
+   *   Auth block:
+   *     unsigned: 0  (auth_size=0 is trivially 64-aligned).
+   *     signed  : hash(32) + sig(256) = 288, 64-aligned → 320.
    */
-  DescUnpaddedLen = 16U + 116U + (UINT64)NameLen + GBL_AVB_SHA256_DIGEST_SIZE;
+  DescUnpaddedLen = 16U + 116U + (UINT64)NameLen + GBL_SYNTH_HASH_LEN;
   DescPad         = (0ULL - DescUnpaddedLen) & 7ULL;
-  AuxSize         = DescUnpaddedLen + DescPad;
-  VbmetaSize      = GBL_AVB_VBMETA_HEADER_SIZE + AuxSize;
-  VbmetaOffset    = (StagedSize + 4095ULL) & ~4095ULL;
+  DescSize        = DescUnpaddedLen + DescPad;
+
+  if (Unsigned) {
+    PkOffset  = 0;
+    PkSize    = 0;
+    AuxUnpad  = DescSize;
+    AuthUnpad = 0;
+  } else {
+    PkOffset  = DescSize;
+    PkSize    = GBL_SYNTH_PUBKEY_LEN;
+    AuxUnpad  = DescSize + GBL_SYNTH_PUBKEY_LEN;
+    AuthUnpad = GBL_SYNTH_HASH_LEN + GBL_SYNTH_SIG_LEN;
+  }
+  AuxPad  = (0ULL - AuxUnpad)  & (GBL_AVB_BLOCK_ALIGN - 1ULL);
+  AuxSize = AuxUnpad + AuxPad;
+  AuthPad = (0ULL - AuthUnpad) & (GBL_AVB_BLOCK_ALIGN - 1ULL);
+  AuthSize = AuthUnpad + AuthPad;
+
+  VbmetaSize        = (UINT64)GBL_AVB_VBMETA_HEADER_SIZE + AuthSize + AuxSize;
+  VbmetaOffset      = (StagedSize + 4095ULL) & ~4095ULL;
+  AuxOffsetInVbmeta = (UINT64)GBL_AVB_VBMETA_HEADER_SIZE + AuthSize;
 
   if (VbmetaOffset + VbmetaSize + GBL_AVB_FOOTER_SIZE > PartSize) {
     AsciiSPrint (Resp, sizeof (Resp),
@@ -4648,23 +4714,25 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
     return;
   }
 
-  /* ---- compute SHA256(staged) ---- */
+  /* ---- compute SHA256(staged) for descriptor.expected_digest ---- */
   avb_sha256_init (&Ctx);
   avb_sha256_update (&Ctx, mFlashDataBuffer, (UINT32)StagedSize);
   DigestPtr = avb_sha256_final (&Ctx);
-  CopyMem (Digest, DigestPtr, GBL_AVB_SHA256_DIGEST_SIZE);
+  CopyMem (ContentDigest, DigestPtr, GBL_AVB_SHA256_DIGEST_SIZE);
 
   /* ---- info ---- */
   AsciiSPrint (Resp, sizeof (Resp),
-               "target part=%llu B  staged=%llu B  vbm_off=%llu  vbm_size=%llu",
-               PartSize, StagedSize, VbmetaOffset, VbmetaSize);
+               "target part=%llu B  staged=%llu B  vbm_off=%llu  vbm_size=%llu  mode=%a",
+               PartSize, StagedSize, VbmetaOffset, VbmetaSize,
+               Unsigned ? "unsigned (OK_NOT_SIGNED)"
+                        : "fake-signed RSA-2048 (SIGNATURE_MISMATCH)");
   FastbootInfo (Resp);
   WaitForTransferComplete ();
 
   AsciiSPrint (Resp, sizeof (Resp),
                "digest = SHA256(staged) %02x%02x%02x%02x...%02x%02x%02x%02x",
-               Digest[0], Digest[1], Digest[2], Digest[3],
-               Digest[28], Digest[29], Digest[30], Digest[31]);
+               ContentDigest[0], ContentDigest[1], ContentDigest[2], ContentDigest[3],
+               ContentDigest[28], ContentDigest[29], ContentDigest[30], ContentDigest[31]);
   FastbootInfo (Resp);
   WaitForTransferComplete ();
 
@@ -4685,57 +4753,73 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   /* Staged content at offset 0. */
   CopyMem (Assembly, mFlashDataBuffer, StagedSize);
 
-  /* ---- AvbVBMetaImageHeader (256 bytes, big-endian) ---- */
   Vp = Assembly + VbmetaOffset;
-  CopyMem    (Vp,        GBL_AVB_VBMETA_MAGIC, 4);  /* magic */
-  SynthBe32 (Vp + 0x04, 1);                          /* required_libavb_version_major */
-  SynthBe32 (Vp + 0x08, 0);                          /* required_libavb_version_minor */
-  SynthBe64 (Vp + 0x0C, 0);                          /* authentication_data_block_size */
-  SynthBe64 (Vp + 0x14, AuxSize);                    /* auxiliary_data_block_size */
-  SynthBe32 (Vp + 0x1C, 0);                          /* algorithm_type = AVB_ALGORITHM_TYPE_NONE */
-  /* hash/signature/public_key/metadata offsets+sizes — zero from AllocateZeroPool */
-  SynthBe64 (Vp + 0x60, 0);                          /* descriptors_offset (within aux) */
-  SynthBe64 (Vp + 0x68, AuxSize);                    /* descriptors_size */
-  SynthBe64 (Vp + 0x70, 0);                          /* rollback_index */
-  SynthBe32 (Vp + 0x78, 0);                          /* flags */
-  SynthBe32 (Vp + 0x7C, 0);                          /* rollback_index_location */
-  /* release_string[48] @ 0x80; reserved[80] @ 0xB0 — banner then zero. */
+  Ap = Vp + GBL_AVB_VBMETA_HEADER_SIZE;
+  Xp = Vp + AuxOffsetInVbmeta;
+
+  /* ---- AvbVBMetaImageHeader (256 B, big-endian) ---- */
+  CopyMem    (Vp,        GBL_AVB_VBMETA_MAGIC, 4);
+  SynthBe32 (Vp + 0x04, 1);                                       /* required_libavb_version_major */
+  SynthBe32 (Vp + 0x08, 0);                                       /* required_libavb_version_minor */
+  SynthBe64 (Vp + 0x0C, AuthSize);                                /* authentication_data_block_size */
+  SynthBe64 (Vp + 0x14, AuxSize);                                 /* auxiliary_data_block_size */
+  SynthBe32 (Vp + 0x1C, Unsigned ? 0U : 1U);                      /* algorithm_type */
+  SynthBe64 (Vp + 0x20, 0);                                       /* hash_offset (in auth) */
+  SynthBe64 (Vp + 0x28, Unsigned ? 0ULL : GBL_SYNTH_HASH_LEN);    /* hash_size */
+  SynthBe64 (Vp + 0x30, Unsigned ? 0ULL : GBL_SYNTH_HASH_LEN);    /* signature_offset (in auth) */
+  SynthBe64 (Vp + 0x38, Unsigned ? 0ULL : GBL_SYNTH_SIG_LEN);     /* signature_size */
+  SynthBe64 (Vp + 0x40, PkOffset);                                /* public_key_offset (in aux) */
+  SynthBe64 (Vp + 0x48, PkSize);                                  /* public_key_size */
+  /* public_key_metadata @ 0x50/0x58 — zero from AllocateZeroPool */
+  SynthBe64 (Vp + 0x60, 0);                                       /* descriptors_offset (in aux) */
+  SynthBe64 (Vp + 0x68, DescSize);                                /* descriptors_size */
+  SynthBe64 (Vp + 0x70, 0);                                       /* rollback_index */
+  SynthBe32 (Vp + 0x78, 0);                                       /* flags */
+  SynthBe32 (Vp + 0x7C, 0);                                       /* rollback_index_location */
   RelLen = (UINT32)AsciiStrLen (Release);
   if (RelLen > 48) {
     RelLen = 48;
   }
   CopyMem (Vp + 0x80, Release, RelLen);
 
-  /* ---- AvbHashDescriptor inside aux ---- */
-  Dp = Vp + GBL_AVB_VBMETA_HEADER_SIZE;
-  SynthBe64 (Dp + 0x00, 2);                          /* tag = AVB_DESCRIPTOR_TAG_HASH */
-  SynthBe64 (Dp + 0x08, AuxSize - 16ULL);            /* num_bytes_following (excludes 16B parent) */
+  /* ---- aux block: AvbHashDescriptor at offset 0 ---- */
+  Dp = Xp;
+  SynthBe64 (Dp + 0x00, 2);                                       /* tag = AVB_DESCRIPTOR_TAG_HASH */
+  SynthBe64 (Dp + 0x08, DescSize - 16ULL);                        /* num_bytes_following */
+  SynthBe64 (Dp + 16U + 0x00, StagedSize);                        /* image_size */
+  CopyMem    (Dp + 16U + 0x08, HashAlgo, AsciiStrLen (HashAlgo)); /* hash_algorithm[32] */
+  SynthBe32 (Dp + 16U + 0x28, NameLen);                           /* partition_name_len */
+  SynthBe32 (Dp + 16U + 0x2C, 0);                                 /* salt_len */
+  SynthBe32 (Dp + 16U + 0x30, (UINT32)GBL_SYNTH_HASH_LEN);        /* digest_len = 32 */
+  SynthBe32 (Dp + 16U + 0x34, 0);                                 /* flags */
+  CopyMem (Dp + 132U,           PartName,      NameLen);
+  CopyMem (Dp + 132U + NameLen, ContentDigest, GBL_AVB_SHA256_DIGEST_SIZE);
 
-  /* body @ Dp + 16 */
-  SynthBe64 (Dp + 16U + 0x00, StagedSize);           /* image_size */
-  CopyMem    (Dp + 16U + 0x08, HashAlgo,
-              AsciiStrLen (HashAlgo));               /* hash_algorithm[32] (rest zero) */
-  SynthBe32 (Dp + 16U + 0x28, NameLen);              /* partition_name_len */
-  SynthBe32 (Dp + 16U + 0x2C, 0);                    /* salt_len = 0 */
-  SynthBe32 (Dp + 16U + 0x30, GBL_AVB_SHA256_DIGEST_SIZE); /* digest_len = 32 */
-  SynthBe32 (Dp + 16U + 0x34, 0);                    /* flags */
-  /* body reserved[60] @ +0x38..+0x73 — zero from AllocateZeroPool */
+  if (!Unsigned) {
+    /* ---- aux block: AvbRSAPublicKey at PkOffset (junk modulus) ---- */
+    Kp = Xp + PkOffset;
+    SynthBe32 (Kp + 0x00, 2048);                                  /* key_num_bits */
+    SynthBe32 (Kp + 0x04, 0);                                     /* n0inv */
+    SetMem    (Kp + 0x08, 256, 0xFF);                             /* N modulus — large non-zero */
+    /* RR @ Kp + 0x08 + 256 — zero from AllocateZeroPool */
 
-  /* trailer @ Dp + 16 + 116 = Dp + 132 */
-  CopyMem (Dp + 132U,                  PartName, NameLen);
-  /* no salt bytes (salt_len = 0) */
-  CopyMem (Dp + 132U + NameLen, Digest, GBL_AVB_SHA256_DIGEST_SIZE);
-  /* trailer pad — zero from AllocateZeroPool */
+    /* ---- auth block: hash = SHA256(header || aux); signature = zeros ---- */
+    avb_sha256_init   (&Ctx);
+    avb_sha256_update (&Ctx, Vp, (UINT32)GBL_AVB_VBMETA_HEADER_SIZE);
+    avb_sha256_update (&Ctx, Xp, (UINT32)AuxSize);
+    DigestPtr = avb_sha256_final (&Ctx);
+    CopyMem (Ap, DigestPtr, GBL_SYNTH_HASH_LEN);
+    /* signature[256] + padding — zero from AllocateZeroPool (RSA verify will fail) */
+  }
 
-  /* ---- AvbFooter (last 64 bytes) ---- */
+  /* ---- AvbFooter (last 64 B) ---- */
   Fp = Assembly + PartSize - GBL_AVB_FOOTER_SIZE;
   CopyMem    (Fp,         GBL_AVB_FOOTER_MAGIC, 4);
-  SynthBe32 (Fp + 0x04,  1);                         /* version_major */
-  SynthBe32 (Fp + 0x08,  0);                         /* version_minor */
-  SynthBe64 (Fp + 0x0C,  StagedSize);                /* original_image_size */
-  SynthBe64 (Fp + 0x14,  VbmetaOffset);              /* vbmeta_offset */
-  SynthBe64 (Fp + 0x1C,  VbmetaSize);                /* vbmeta_size */
-  /* reserved[28] @ +0x24..+0x3F — zero from AllocateZeroPool */
+  SynthBe32 (Fp + 0x04,  1);
+  SynthBe32 (Fp + 0x08,  0);
+  SynthBe64 (Fp + 0x0C,  StagedSize);
+  SynthBe64 (Fp + 0x14,  VbmetaOffset);
+  SynthBe64 (Fp + 0x1C,  VbmetaSize);
 
   /* ---- write to partition ---- */
   Status = WriteBlockToPartition (BlockIo, Handle, 0, PartSize, Assembly);
@@ -4748,8 +4832,9 @@ CmdOemSynthesizeAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   FreePool (Assembly);
 
   AsciiSPrint (Resp, sizeof (Resp),
-               "synthesized %s: wrote %llu B (image=%llu B, vbmeta @ %llu B)",
-               ResolvedName, PartSize, StagedSize, VbmetaOffset);
+               "synthesized %s: wrote %llu B (image=%llu B, vbmeta @ %llu B, %a)",
+               ResolvedName, PartSize, StagedSize, VbmetaOffset,
+               Unsigned ? "OK_NOT_SIGNED" : "SIGNATURE_MISMATCH");
   FastbootOkay (Resp);
 }
 
