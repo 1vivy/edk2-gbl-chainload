@@ -146,6 +146,20 @@ STATIC MENU_MSG_INFO mFastbootOptionTitle[] = {
       OPTION_ITEM,
       0,
       ALTERNATESLOT},
+    {{"Fix recovery vbmeta footer"},
+     BIG_FACTOR,
+     BGR_YELLOW,
+     BGR_BLACK,
+     OPTION_ITEM,
+     0,
+     FIX_RECOVERY_VBMETA},
+    {{"Escape to patched ABL"},
+     BIG_FACTOR,
+     BGR_CYAN,
+     BGR_BLACK,
+     OPTION_ITEM,
+     0,
+     ESCAPE_TO_PATCHED_ABL},
 };
 
 STATIC MENU_MSG_INFO mFastbootCommonWarnMsgInfo[] = {

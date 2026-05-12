@@ -5136,6 +5136,77 @@ CmdOemFixVbmetaFooter (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   }
 }
 
+/* -------------------------------------------------------------------------
+ * Menu action wrappers — invoked from MenuKeysDetection.c.  Non-STATIC so
+ * the linker can resolve them from the BootLib menu dispatcher.  These run
+ * while the fastboot menu UI is on-screen (no USB fastboot session active),
+ * so they emit NO FastbootInfo packets — return value carries success/fail.
+ * ------------------------------------------------------------------------- */
+EFI_STATUS EFIAPI
+GblMenuActionFixRecoveryVbmeta (VOID)
+{
+  EFI_STATUS              Status;
+  CHAR8                   Resp[MAX_RSP_SIZE];
+  CONST CHAR8            *PartName = "recovery";
+  CONST UINT32            NameLen  = 8;
+
+  EFI_BLOCK_IO_PROTOCOL  *BlockIo  = NULL;
+  EFI_HANDLE             *Handle   = NULL;
+  CHAR16                  ResolvedName[MAX_GPT_NAME_SIZE];
+  UINT64                  PartSize  = 0;
+  UINT64                  BlockSize, ReadBytes;
+  UINT8                  *PartBuf   = NULL;
+  CONST UINT8            *FooterPtr;
+  UINT64                  FooterOrigImgSize;
+
+  Status = LocatePartition (PartName, &BlockIo, &Handle,
+                            ResolvedName, ARRAY_SIZE (ResolvedName));
+  if (EFI_ERROR (Status) || BlockIo == NULL)
+    return EFI_ERROR (Status) ? Status : EFI_NOT_FOUND;
+
+  PartSize = GetPartitionSize (BlockIo);
+  if (PartSize < GBL_AVB_FOOTER_SIZE + GBL_AVB_VBMETA_HEADER_SIZE)
+    return EFI_VOLUME_CORRUPTED;
+
+  BlockSize = BlockIo->Media->BlockSize;
+  ReadBytes = (PartSize + BlockSize - 1) & ~(BlockSize - 1);
+  PartBuf   = AllocatePool (ReadBytes);
+  if (PartBuf == NULL)
+    return EFI_OUT_OF_RESOURCES;
+
+  Status = BlockIo->ReadBlocks (BlockIo, BlockIo->Media->MediaId,
+                                0, ReadBytes, PartBuf);
+  if (EFI_ERROR (Status)) {
+    FreePool (PartBuf);
+    return Status;
+  }
+
+  FooterPtr = PartBuf + (PartSize - GBL_AVB_FOOTER_SIZE);
+  if (CompareMem (FooterPtr, GBL_AVB_FOOTER_MAGIC, 4) != 0) {
+    FreePool (PartBuf);
+    return EFI_VOLUME_CORRUPTED;
+  }
+  FooterOrigImgSize = GblBe64 (FooterPtr + 0x0C);
+  if (FooterOrigImgSize == 0 || FooterOrigImgSize > PartSize) {
+    FreePool (PartBuf);
+    return EFI_VOLUME_CORRUPTED;
+  }
+
+  Status = GblSynthesizeAndCommit (PartName, NameLen,
+                                   PartBuf, FooterOrigImgSize,
+                                   TRUE,    /* DoCommit */
+                                   FALSE,   /* EmitFastbootInfo */
+                                   Resp, sizeof (Resp));
+  FreePool (PartBuf);
+  return Status;
+}
+
+EFI_STATUS EFIAPI
+GblMenuActionEscape (VOID)
+{
+  return BootFlowChainLoad ();
+}
+
 /* GBL_PART_DESC_TYPE is forward-declared above the synthesize block. */
 
 /*

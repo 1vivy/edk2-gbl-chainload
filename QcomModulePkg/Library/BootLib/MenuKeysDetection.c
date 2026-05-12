@@ -210,6 +210,28 @@ UpdateDeviceStatus (OPTION_MENU_INFO *MsgInfo, INTN Reason)
     DEBUG ((EFI_D_WARN,
           "Boot to ESP failed, please check the ESP partition existence\n"));
     break;
+  case FIX_RECOVERY_VBMETA:
+    {
+      /* Resolved at link time from FastbootLib (FastbootCmds.c). */
+      extern EFI_STATUS EFIAPI GblMenuActionFixRecoveryVbmeta (VOID);
+      EFI_STATUS RecStatus = GblMenuActionFixRecoveryVbmeta ();
+      DEBUG ((EFI_D_WARN,
+            "FIX_RECOVERY_VBMETA returned %r\n", RecStatus));
+      DisplayFastbootMenu ();
+    }
+    break;
+  case ESCAPE_TO_PATCHED_ABL:
+    {
+      extern EFI_STATUS EFIAPI GblMenuActionEscape (VOID);
+      EFI_STATUS EscStatus;
+      ExitMenuKeysDetection ();
+      EscStatus = GblMenuActionEscape ();
+      DEBUG ((EFI_D_WARN,
+            "ESCAPE_TO_PATCHED_ABL returned %r (falling back to menu)\n",
+            EscStatus));
+      DisplayFastbootMenu ();
+    }
+    break;
   }
 }
 

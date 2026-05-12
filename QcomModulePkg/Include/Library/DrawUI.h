@@ -153,6 +153,8 @@ typedef enum {
   NOACTION,
   ESP,
   BOOTPATH,
+  FIX_RECOVERY_VBMETA,                /* synthesize recovery vbmeta in-place */
+  ESCAPE_TO_PATCHED_ABL,              /* equivalent to `oem escape` */
   OPTION_ACTION_MAX,
 } OPTION_ITEM_ACTION;
 
