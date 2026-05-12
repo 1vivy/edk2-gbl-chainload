@@ -5207,6 +5207,256 @@ GblMenuActionEscape (VOID)
   return BootFlowChainLoad ();
 }
 
+/* -------------------------------------------------------------------------
+ * `oem graft-from-staged <partition> [commit]`
+ *
+ * Reads the bytes already staged via `fastboot stage` (which the user
+ * supplies as the device's STOCK recovery.img — i.e. the original signed
+ * image with intact OEM vbmeta + footer at end of file), extracts the
+ * stock vbmeta image bytes verbatim, and pastes them onto the partition's
+ * EXISTING on-disk content at the natural placement
+ *   round_up(content_size, 4 KiB)
+ * — preserving the custom content already flashed there.
+ *
+ * Effect (vs synthesize / fix-vbmeta-footer):
+ *   - libavb's avb_vbmeta_image_verify runs on bit-for-bit stock bytes,
+ *     so the OEM signature verifies against the OEM pubkey embedded in
+ *     stock's aux block.  Image-verify returns OK.
+ *   - Per-vbmeta slot_data.vbmeta_images[i].verify_result = OK (set by
+ *     avb_vbmeta_image_verify, which is what downstream ABL cmdline
+ *     emit and mode-1 RoT-payload reads).
+ *   - libavb walks stock's hash descriptor → its expected_digest is
+ *     stock content's hash, but on-disk is our custom content → digest
+ *     mismatch at descriptor processing → ERROR_VERIFICATION at slot
+ *     level (recoverable per result_should_continue → patch10 catches).
+ *
+ * Placement detail: stock's footer.vbmeta_offset is end-of-stock-content
+ * (39288832 on infiniti), which is well INSIDE the custom recovery
+ * (OrangeFox ~67 MB).  Writing stock vbmeta at stock's offset would
+ * overwrite custom content — the bug the original graft hit that broke
+ * recovery boot.  This command writes at the natural placement instead.
+ *
+ * Workflow:
+ *   fastboot flash recovery <custom>.img           # vendor flash
+ *   fastboot stage /path/to/stock_recovery.img     # provide graft source
+ *   fastboot oem graft-from-staged recovery        # dry-run
+ *   fastboot oem graft-from-staged recovery commit # write
+ * ------------------------------------------------------------------------- */
+STATIC VOID
+CmdOemGraftFromStaged (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  EFI_STATUS              Status;
+  CHAR8                   Resp[MAX_RSP_SIZE];
+  CHAR8                   PartName[MAX_GPT_NAME_SIZE];
+  CONST CHAR8            *ArgPtr, *Rest;
+  UINT32                  NameLen;
+  BOOLEAN                 DoCommit = FALSE;
+
+  CONST UINT8            *StagedBuf;
+  UINT64                  StagedSize;
+  CONST UINT8            *StagedFooter;
+  UINT64                  StockVbmOff, StockVbmSize, StockOrigSize;
+  CONST UINT8            *StockVbmSlice;
+  UINT32                  StockAlgo;
+
+  EFI_BLOCK_IO_PROTOCOL  *BlockIo  = NULL;
+  EFI_HANDLE             *Handle   = NULL;
+  CHAR16                  ResolvedName[MAX_GPT_NAME_SIZE];
+  UINT64                  PartSize  = 0;
+  UINT64                  BlockSize, ReadBytes;
+  UINT8                  *PartBuf   = NULL;
+  UINT8                  *Assembly  = NULL;
+  CONST UINT8            *OnDiskFooter;
+  UINT64                  OnDiskContentSize;
+  UINT64                  PlacementOff;
+  UINT8                  *Fp;
+
+  /* ---- parse args: "<partition> [commit]" ---- */
+  ArgPtr = Arg;
+  while (*ArgPtr == ' ') ArgPtr++;
+  NameLen = 0;
+  while (ArgPtr[NameLen] != '\0' && ArgPtr[NameLen] != ' ' &&
+         NameLen < sizeof (PartName) - 1) {
+    NameLen++;
+  }
+  if (NameLen == 0) {
+    FastbootFail ("usage: oem graft-from-staged <partition> [commit]");
+    return;
+  }
+  AsciiStrnCpyS (PartName, sizeof (PartName), ArgPtr, NameLen);
+  Rest = ArgPtr + NameLen;
+  while (*Rest == ' ') Rest++;
+  if (AsciiStrCmp (Rest, "commit") == 0) {
+    DoCommit = TRUE;
+  } else if (*Rest != '\0') {
+    FastbootFail ("unknown trailing token (expected 'commit' or empty)");
+    return;
+  }
+
+  /* ---- exchange staging buffer (stock recovery.img) ---- */
+  ExchangeFlashAndUsbDataBuf ();
+  if (mFlashDataBuffer == NULL || mFlashNumDataBytes == 0) {
+    FastbootFail ("no staged image -- run `fastboot stage <stock_recovery.img>` first");
+    return;
+  }
+  StagedBuf  = mFlashDataBuffer;
+  StagedSize = mFlashNumDataBytes;
+
+  if (StagedSize < GBL_AVB_FOOTER_SIZE + GBL_AVB_VBMETA_HEADER_SIZE) {
+    FastbootFail ("staged image too small to contain a vbmeta footer");
+    return;
+  }
+
+  /* ---- parse staged footer at end-64 to find stock vbmeta slice ---- */
+  StagedFooter = StagedBuf + (StagedSize - GBL_AVB_FOOTER_SIZE);
+  if (CompareMem (StagedFooter, GBL_AVB_FOOTER_MAGIC, 4) != 0) {
+    FastbootFail ("staged image: no AvbFooter magic at end-64 -- not a signed recovery.img");
+    return;
+  }
+  StockOrigSize = GblBe64 (StagedFooter + 0x0C);
+  StockVbmOff   = GblBe64 (StagedFooter + 0x14);
+  StockVbmSize  = GblBe64 (StagedFooter + 0x1C);
+
+  if (StockVbmOff + StockVbmSize > StagedSize - GBL_AVB_FOOTER_SIZE ||
+      StockVbmSize < GBL_AVB_VBMETA_HEADER_SIZE) {
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "staged: vbm_off=%llu vbm_sz=%llu out of bounds for staged=%llu",
+                 StockVbmOff, StockVbmSize, StagedSize);
+    FastbootFail (Resp);
+    return;
+  }
+
+  StockVbmSlice = StagedBuf + StockVbmOff;
+  if (CompareMem (StockVbmSlice, GBL_AVB_VBMETA_MAGIC, 4) != 0) {
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "staged: no AVB0 magic at vbm_off=%llu", StockVbmOff);
+    FastbootFail (Resp);
+    return;
+  }
+  StockAlgo = (UINT32)GblBe32 (StockVbmSlice + 0x1C);
+  if (StockAlgo == 0) {
+    /* Unsigned stock vbmeta isn't useful for graft — image-verify would
+     * still go down the OK_NOT_SIGNED path, not the OK path.
+     */
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "staged vbmeta has algorithm_type=0 (unsigned) -- graft needs a signed source");
+    FastbootFail (Resp);
+    return;
+  }
+
+  /* ---- locate target partition + read current content ---- */
+  Status = LocatePartition (PartName, &BlockIo, &Handle,
+                            ResolvedName, ARRAY_SIZE (ResolvedName));
+  if (EFI_ERROR (Status) || BlockIo == NULL) {
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "partition '%a' not found: %r", PartName, Status);
+    FastbootFail (Resp);
+    return;
+  }
+  PartSize = GetPartitionSize (BlockIo);
+  if (PartSize < GBL_AVB_FOOTER_SIZE + GBL_AVB_VBMETA_HEADER_SIZE) {
+    FastbootFail ("partition too small to hold a vbmeta footer");
+    return;
+  }
+
+  BlockSize = BlockIo->Media->BlockSize;
+  ReadBytes = (PartSize + BlockSize - 1) & ~(BlockSize - 1);
+  PartBuf   = AllocatePool (ReadBytes);
+  if (PartBuf == NULL) {
+    FastbootFail ("alloc failed for partition read");
+    return;
+  }
+  Status = BlockIo->ReadBlocks (BlockIo, BlockIo->Media->MediaId,
+                                0, ReadBytes, PartBuf);
+  if (EFI_ERROR (Status)) {
+    AsciiSPrint (Resp, sizeof (Resp), "partition read failed: %r", Status);
+    FastbootFail (Resp);
+    FreePool (PartBuf);
+    return;
+  }
+
+  /* ---- read on-disk footer for content_size ---- */
+  OnDiskFooter = PartBuf + (PartSize - GBL_AVB_FOOTER_SIZE);
+  if (CompareMem (OnDiskFooter, GBL_AVB_FOOTER_MAGIC, 4) != 0) {
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "on-disk '%a' has no AvbFooter -- can't determine content_size", PartName);
+    FastbootFail (Resp);
+    FreePool (PartBuf);
+    return;
+  }
+  OnDiskContentSize = GblBe64 (OnDiskFooter + 0x0C);
+  if (OnDiskContentSize == 0 || OnDiskContentSize > PartSize) {
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "on-disk footer.original_image_size=%llu invalid for part=%llu",
+                 OnDiskContentSize, PartSize);
+    FastbootFail (Resp);
+    FreePool (PartBuf);
+    return;
+  }
+
+  PlacementOff = (OnDiskContentSize + 4095ULL) & ~4095ULL;
+  if (PlacementOff + StockVbmSize + GBL_AVB_FOOTER_SIZE > PartSize) {
+    AsciiSPrint (Resp, sizeof (Resp),
+                 "partition too small: content=%llu + pad + stock_vbmeta=%llu + footer=64 > %llu",
+                 OnDiskContentSize, StockVbmSize, PartSize);
+    FastbootFail (Resp);
+    FreePool (PartBuf);
+    return;
+  }
+
+  AsciiSPrint (Resp, sizeof (Resp),
+               "target=%a part=%llu B  on-disk content=%llu B  stock vbm_sz=%llu  algo=%u",
+               PartName, PartSize, OnDiskContentSize, StockVbmSize, StockAlgo);
+  FastbootInfo (Resp);
+  WaitForTransferComplete ();
+
+  AsciiSPrint (Resp, sizeof (Resp),
+               "placement: stock had vbmeta @ %llu; placing @ %llu (preserves content)",
+               StockVbmOff, PlacementOff);
+  FastbootInfo (Resp);
+  WaitForTransferComplete ();
+
+  if (!DoCommit) {
+    FastbootInfo ("DRY RUN -- re-issue with 'commit' to write");
+    WaitForTransferComplete ();
+    FreePool (PartBuf);
+    FastbootOkay ("");
+    return;
+  }
+
+  /* ---- assemble (reuse PartBuf as the workspace; zero the trailing region) ---- */
+  Assembly = PartBuf;   /* in-place edit */
+
+  /* Zero out the post-content region before laying the new vbmeta + footer. */
+  SetMem (Assembly + OnDiskContentSize, PartSize - OnDiskContentSize, 0);
+
+  /* Place stock vbmeta at natural offset. */
+  CopyMem (Assembly + PlacementOff, StockVbmSlice, StockVbmSize);
+
+  /* Write new AvbFooter at end-64 pointing to our placement. */
+  Fp = Assembly + (PartSize - GBL_AVB_FOOTER_SIZE);
+  CopyMem    (Fp,         GBL_AVB_FOOTER_MAGIC, 4);
+  SynthBe32 (Fp + 0x04,  1);                          /* version_major */
+  SynthBe32 (Fp + 0x08,  0);                          /* version_minor */
+  SynthBe64 (Fp + 0x0C,  OnDiskContentSize);          /* original_image_size */
+  SynthBe64 (Fp + 0x14,  PlacementOff);               /* vbmeta_offset */
+  SynthBe64 (Fp + 0x1C,  StockVbmSize);               /* vbmeta_size */
+
+  Status = WriteBlockToPartition (BlockIo, Handle, 0, PartSize, Assembly);
+  if (EFI_ERROR (Status)) {
+    AsciiSPrint (Resp, sizeof (Resp), "WriteBlockToPartition failed: %r", Status);
+    FastbootFail (Resp);
+    FreePool (PartBuf);
+    return;
+  }
+  FreePool (PartBuf);
+
+  AsciiSPrint (Resp, sizeof (Resp),
+               "grafted stock vbmeta onto %s: content=%llu B, vbmeta @ %llu",
+               ResolvedName, OnDiskContentSize, PlacementOff);
+  FastbootOkay (Resp);
+}
+
 /* GBL_PART_DESC_TYPE is forward-declared above the synthesize block. */
 
 /*
@@ -6179,6 +6429,7 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
       {"oem rpmb-unlock", CmdOemRpmbUnlock},
       {"oem synthesize-and-flash", CmdOemSynthesizeAndFlash},
       {"oem fix-vbmeta-footer",    CmdOemFixVbmetaFooter},
+      {"oem graft-from-staged",    CmdOemGraftFromStaged},
       {"oem vbmeta-status", CmdOemVbmetaStatus},
 #endif
       {"oem boot-efi", CmdOemBootEfi},
