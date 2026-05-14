@@ -210,6 +210,15 @@ UpdateDeviceStatus (OPTION_MENU_INFO *MsgInfo, INTN Reason)
     DEBUG ((EFI_D_WARN,
           "Boot to ESP failed, please check the ESP partition existence\n"));
     break;
+  case ESCAPE:
+    {
+      extern EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
+      ExitMenuKeysDetection ();
+      BootFlowChainLoad ();
+      DisplayFastbootMenu ();
+      DEBUG ((EFI_D_WARN, "Escape chainload returned, back to fastboot menu\n"));
+      break;
+    }
   }
 }
 

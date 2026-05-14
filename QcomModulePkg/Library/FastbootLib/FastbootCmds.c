@@ -83,7 +83,7 @@ found at
 #endif
 #if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
 EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
-#include <Library/AvbParseLib.h>
+#include <avb/libavb/libavb.h>
 #endif
 #include <Protocol/DiskIo.h>
 #include <Protocol/EFIUsbDevice.h>
@@ -102,6 +102,34 @@ EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
 #include "MetaFormat.h"
 #include "SparseFormat.h"
 #include "Recovery.h"
+
+#if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
+typedef AvbFooter            GBL_AVB_FOOTER;
+typedef AvbVBMetaImageHeader GBL_AVB_VBMETA_HEADER;
+typedef AvbDescriptorTag     GBL_AVB_DESCRIPTOR_TAG;
+
+#define GBL_AVB_VBMETA_HEADER_SIZE AVB_VBMETA_IMAGE_HEADER_SIZE
+
+/* Field-name compatibility for the old local AvbParseLib structs. */
+#define VbmetaOffset                  vbmeta_offset
+#define VbmetaSize                    vbmeta_size
+#define OriginalImageSize             original_image_size
+#define AvbMajorVersion               required_libavb_version_major
+#define AvbMinorVersion               required_libavb_version_minor
+#define AlgorithmType                 algorithm_type
+#define AuthenticationDataBlockSize   authentication_data_block_size
+#define AuxiliaryDataBlockSize        auxiliary_data_block_size
+#define Flags                         flags
+
+#define GblAvbDescHashTag             AVB_DESCRIPTOR_TAG_HASH
+#define GblAvbDescChainPartitionTag   AVB_DESCRIPTOR_TAG_CHAIN_PARTITION
+
+STATIC EFI_STATUS AvbParse_Footer (IN CONST UINT8 *Partition, IN UINT64 PartitionSize, OUT GBL_AVB_FOOTER *FooterOut);
+STATIC EFI_STATUS AvbParse_VbmetaHeader (IN CONST UINT8 *Vbmeta, IN UINT64 VbmetaSize, OUT GBL_AVB_VBMETA_HEADER *HeaderOut);
+STATIC EFI_STATUS AvbParse_NextDescriptor (IN CONST UINT8 *AuxBlock, IN UINT64 AuxSize, IN OUT UINT64 *Cursor, OUT GBL_AVB_DESCRIPTOR_TAG *TagOut, OUT CONST UINT8 **DescriptorOut, OUT UINT64 *DescriptorLenOut);
+STATIC EFI_STATUS AvbParse_HashDescriptor (IN CONST UINT8 *Descriptor, IN UINT64 DescriptorLen, OUT CONST UINT8 **PartitionNameOut, OUT UINT32 *PartitionNameLenOut, OUT CONST UINT8 **DigestOut, OUT UINT32 *DigestLenOut);
+STATIC EFI_STATUS AvbParse_ChainPartitionDescriptor (IN CONST UINT8 *Descriptor, IN UINT64 DescriptorLen, OUT CONST UINT8 **PartitionNameOut, OUT UINT32 *PartitionNameLenOut, OUT CONST UINT8 **PublicKeyOut, OUT UINT32 *PublicKeyLenOut);
+#endif
 
 STATIC struct GetVarPartitionInfo part_info[] = {
     {"system", "partition-size:", "partition-type:", "", "ext4"},
@@ -170,6 +198,9 @@ STATIC CHAR8 CurrentSlotFB[MAX_SLOT_SUFFIX_SZ];
 
 #define MAX_DISPLAY_PANEL_OVERRIDE 256
 #define MAX_GPU_CONFIG_OVERRIDE 256
+
+#define _GBL_STR(x)  #x
+#define GBL_STR(x)   _GBL_STR(x)
 
 /*This variable is used to skip populating the FastbootVar
  * When PopulateMultiSlotInfo called while flashing each Lun
@@ -3290,30 +3321,18 @@ SetDeviceUnlock (UINT32 Type, BOOLEAN State)
     return;
   }
 
-  if (GetAVBVersion () != AVB_LE &&
-      is_display_supported () &&
-      IsEnableDisplayMenuFlagSupported ()) {
-    Status = DisplayUnlockMenu (Type, State);
-    if (Status != EFI_SUCCESS) {
-      FastbootFail ("Command not support: the display is not enabled");
-      return;
-    } else {
-      FastbootOkay ("");
-    }
-  } else {
-    Status = SetDeviceUnlockValue (Type, State);
-    if (Status != EFI_SUCCESS) {
-         AsciiSPrint (response, MAX_RSP_SIZE, "\tSet device %a failed: %r",
-                  (State ? "unlocked!" : "locked!"), Status);
-         FastbootFail (response);
-         return;
-    }
-    FastbootOkay ("");
-    if (GetAVBVersion () != AVB_LE &&
-       !IsEnableDisplayMenuFlagSupported ()) {
-      RebootDevice (RECOVERY_MODE);
-    }
+  Status = SetDeviceUnlockValue (Type, State);
+  if (Status != EFI_SUCCESS) {
+       AsciiSPrint (response, MAX_RSP_SIZE, "\tSet device %a failed: %r",
+                (State ? "unlocked!" : "locked!"), Status);
+       FastbootFail (response);
+       return;
   }
+
+  FastbootInfo ("WARNING: data wipe skipped");
+  FastbootInfo ("Wipe from custom recovery if FBE re-encryption needed");
+  WaitForTransferComplete ();
+  FastbootOkay ("");
 }
 #endif
 
@@ -4343,27 +4362,21 @@ CmdOemBootEfi (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
     return;
   }
 
-  /* Reply OKAY before handing off so the host's fastboot terminates
-   * cleanly.  StartImage does not return on a successful boot — control
-   * transfers to the staged image permanently.  If it does return (image
-   * exited back to UEFI), the rc is logged to ConOut for after-the-fact
-   * triage; the host has already moved on and must not receive a second
-   * OKAY/FAIL reply. */
+  /* Tear down USB cleanly before handing off — mirrors CmdContinue/CmdBoot.
+   * Without FastbootUsbDeviceStop the host sees "Status read failed" because
+   * the USB device disappears mid-protocol. */
+  ExitMenuKeysDetection ();
   FastbootOkay ("started");
-  WaitForTransferComplete ();
+  FastbootUsbDeviceStop ();
+  Finished = TRUE;
 
   Status = gBS->StartImage (ImageHandle, NULL, NULL);
 
   /* Only reachable if the staged image returned to its caller rather than
-   * chainloading another OS.  Log the rc — do NOT call FastbootOkay/Fail
-   * again; the host already saw OKAY above. */
-  {
-    CHAR8 LogLine[160];
-    AsciiSPrint (LogLine, sizeof (LogLine),
-                 "oem boot-efi: StartImage returned %r (image exited back to UEFI)\n",
-                 Status);
-    Print (L"%a", LogLine);
-  }
+   * chainloading another OS.  Log the rc for after-the-fact triage. */
+  DEBUG ((EFI_D_ERROR,
+          "oem boot-efi: StartImage returned %r (image exited back to UEFI)\n",
+          Status));
 }
 
 #if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
@@ -4378,14 +4391,19 @@ STATIC VOID
 CmdOemEscape (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 {
   EFI_STATUS Status;
-  CHAR8 Resp[MAX_RSP_SIZE];
 
-  FastbootInfo ("escaping to patched ABL");
+  /* Tear down USB cleanly before handing off — mirrors CmdContinue/CmdBoot.
+   * Without FastbootUsbDeviceStop the host sees "Status read failed". */
+  ExitMenuKeysDetection ();
+  FastbootOkay ("escaping to patched ABL");
+  FastbootUsbDeviceStop ();
+  Finished = TRUE;
   Status = BootFlowChainLoad ();
 
-  AsciiSPrint (Resp, sizeof (Resp),
-               "escape returned %r (falling back to fastboot)", Status);
-  FastbootFail (Resp);
+  /* Only reachable if chainload returned (shouldn't on success). */
+  DEBUG ((EFI_D_ERROR,
+          "oem escape: BootFlowChainLoad returned %r\n",
+          Status));
 }
 
 #define GBL_RPMB_UNLOCK_CONFIRM " CONFIRM_WIPE"
@@ -4441,6 +4459,80 @@ STATIC VOID
 CmdOemRpmbUnlock (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 {
   CmdOemRpmbSetUnlockState (Arg, TRUE);
+}
+
+/*
+ * WriteAllowUnlockValue — write the OEM-unlock-allowed bit to the FRP
+ * partition. This is the equivalent of Android's Developer Settings →
+ * "OEM unlocking" toggle. The bit lives at the LSB of the last byte of
+ * the last block of the `frp` partition.
+ */
+STATIC EFI_STATUS
+WriteAllowUnlockValue (UINT32 Value)
+{
+  EFI_STATUS             Status;
+  EFI_BLOCK_IO_PROTOCOL *BlockIo = NULL;
+  EFI_HANDLE            *Handle  = NULL;
+  UINT8                 *Buffer;
+
+  Status = PartitionGetInfo ((CHAR16 *)L"frp", &BlockIo, &Handle);
+  if (EFI_ERROR (Status))
+    return Status;
+
+  if (!BlockIo)
+    return EFI_NOT_FOUND;
+
+  Buffer = AllocateZeroPool (BlockIo->Media->BlockSize);
+  if (!Buffer)
+    return EFI_OUT_OF_RESOURCES;
+
+  Status = BlockIo->ReadBlocks (BlockIo, BlockIo->Media->MediaId,
+                                BlockIo->Media->LastBlock,
+                                BlockIo->Media->BlockSize, Buffer);
+  if (EFI_ERROR (Status)) {
+    FreePool (Buffer);
+    return Status;
+  }
+
+  if (Value)
+    Buffer[BlockIo->Media->BlockSize - 1] |= 0x01;
+  else
+    Buffer[BlockIo->Media->BlockSize - 1] &= ~0x01;
+
+  Status = BlockIo->WriteBlocks (BlockIo, BlockIo->Media->MediaId,
+                                 BlockIo->Media->LastBlock,
+                                 BlockIo->Media->BlockSize, Buffer);
+  FreePool (Buffer);
+
+  if (!EFI_ERROR (Status)) {
+    IsAllowUnlock = Value & 0x01;
+  }
+
+  return Status;
+}
+
+/*
+ * CmdOemUnlockToggle — `fastboot oem oem-unlock-toggle`
+ *
+ * Toggles the OEM unlock allowed bit in the FRP partition.
+ */
+STATIC VOID
+CmdOemUnlockToggle (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  EFI_STATUS Status;
+  CHAR8 Resp[MAX_RSP_SIZE];
+  UINT32 NewValue = IsAllowUnlock ? 0 : 1;
+
+  Status = WriteAllowUnlockValue (NewValue);
+  if (EFI_ERROR (Status)) {
+    AsciiSPrint (Resp, sizeof (Resp), "Failed to write FRP: %r", Status);
+    FastbootFail (Resp);
+    return;
+  }
+
+  AsciiSPrint (Resp, sizeof (Resp), "OEM unlock %a",
+               NewValue ? "enabled" : "disabled");
+  FastbootOkay (Resp);
 }
 
 /*
@@ -4724,29 +4816,158 @@ CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 /* -------------------------------------------------------------------------
  * getvar vbmeta:* handlers
  *
- * SHA256 is provided by AvbLib (linked transitively via BootLib → AvbLib).
- * Forward-declare the avb_sha256 context and functions to avoid the
- * AVB_INSIDE_LIBAVB_H include-guard problem.
+ * Use libavb's canonical footer/vbmeta/descriptor helpers.  Keep a small
+ * compatibility shim for the local debug code so the backend is libavb while
+ * the table/report logic remains compact.
  * -------------------------------------------------------------------------
  */
-#define GBL_AVB_SHA256_DIGEST_SIZE  32
-#define GBL_AVB_SHA256_BLOCK_SIZE   64
-
-typedef struct {
-  UINT32  h[8];
-  UINT32  tot_len;
-  UINT32  len;
-  UINT8   block[2 * GBL_AVB_SHA256_BLOCK_SIZE];
-  UINT8   buf[GBL_AVB_SHA256_DIGEST_SIZE];
-  VOID   *user_data;
-} GBL_AvbSHA256Ctx;
-
-VOID   avb_sha256_init   (VOID *ctx);
-VOID   avb_sha256_update (VOID *ctx, CONST UINT8 *data, UINT32 len);
-UINT8 *avb_sha256_final  (VOID *ctx);
-
-#define GBL_VBMETA_SHA256_LEN  GBL_AVB_SHA256_DIGEST_SIZE
+#define GBL_VBMETA_SHA256_LEN  AVB_SHA256_DIGEST_SIZE
 #define GBL_VBMETA_HEX_LEN    65   /* 32*2 + NUL */
+
+STATIC EFI_STATUS
+AvbParse_Footer (
+  IN  CONST UINT8     *Partition,
+  IN  UINT64           PartitionSize,
+  OUT GBL_AVB_FOOTER  *FooterOut
+  )
+{
+  if (Partition == NULL || FooterOut == NULL)
+    return EFI_INVALID_PARAMETER;
+  if (PartitionSize < AVB_FOOTER_SIZE)
+    return EFI_INVALID_PARAMETER;
+  if (!avb_footer_validate_and_byteswap (
+          (CONST AvbFooter *)(Partition + PartitionSize - AVB_FOOTER_SIZE),
+          FooterOut))
+    return EFI_NOT_FOUND;
+  if (FooterOut->vbmeta_offset + FooterOut->vbmeta_size > PartitionSize)
+    return EFI_INVALID_PARAMETER;
+  return EFI_SUCCESS;
+}
+
+STATIC EFI_STATUS
+AvbParse_VbmetaHeader (
+  IN  CONST UINT8              *Vbmeta,
+  IN  UINT64                    VbmetaSize,
+  OUT GBL_AVB_VBMETA_HEADER    *HeaderOut
+  )
+{
+  AvbVBMetaVerifyResult Result;
+
+  if (Vbmeta == NULL || HeaderOut == NULL)
+    return EFI_INVALID_PARAMETER;
+
+  Result = avb_vbmeta_image_verify (Vbmeta, (size_t)VbmetaSize, NULL, NULL);
+  if (Result != AVB_VBMETA_VERIFY_RESULT_OK &&
+      Result != AVB_VBMETA_VERIFY_RESULT_OK_NOT_SIGNED)
+    return EFI_VOLUME_CORRUPTED;
+
+  avb_vbmeta_image_header_to_host_byte_order (
+      (CONST AvbVBMetaImageHeader *)Vbmeta, HeaderOut);
+  return EFI_SUCCESS;
+}
+
+STATIC EFI_STATUS
+AvbParse_NextDescriptor (
+  IN  CONST UINT8              *AuxBlock,
+  IN  UINT64                    AuxSize,
+  IN OUT UINT64                *Cursor,
+  OUT GBL_AVB_DESCRIPTOR_TAG   *TagOut,
+  OUT CONST UINT8             **DescriptorOut,
+  OUT UINT64                   *DescriptorLenOut
+  )
+{
+  CONST AvbDescriptor *Desc;
+  AvbDescriptor       HostDesc;
+  UINT64              Total;
+
+  if (AuxBlock == NULL || Cursor == NULL || TagOut == NULL ||
+      DescriptorOut == NULL || DescriptorLenOut == NULL)
+    return EFI_INVALID_PARAMETER;
+  if (*Cursor == AuxSize)
+    return EFI_END_OF_MEDIA;
+  if (*Cursor > AuxSize || AuxSize - *Cursor < sizeof (AvbDescriptor))
+    return EFI_INVALID_PARAMETER;
+
+  Desc = (CONST AvbDescriptor *)(AuxBlock + *Cursor);
+  if (!avb_descriptor_validate_and_byteswap (Desc, &HostDesc))
+    return EFI_INVALID_PARAMETER;
+
+  Total = sizeof (AvbDescriptor) + HostDesc.num_bytes_following;
+  if (*Cursor + Total > AuxSize)
+    return EFI_INVALID_PARAMETER;
+
+  *TagOut           = (GBL_AVB_DESCRIPTOR_TAG)HostDesc.tag;
+  *DescriptorOut    = (CONST UINT8 *)Desc;
+  *DescriptorLenOut = Total;
+  *Cursor          += Total;
+  return EFI_SUCCESS;
+}
+
+STATIC EFI_STATUS
+AvbParse_HashDescriptor (
+  IN  CONST UINT8   *Descriptor,
+  IN  UINT64         DescriptorLen,
+  OUT CONST UINT8  **PartitionNameOut,
+  OUT UINT32        *PartitionNameLenOut,
+  OUT CONST UINT8  **DigestOut,
+  OUT UINT32        *DigestLenOut
+  )
+{
+  AvbHashDescriptor HostDesc;
+  CONST UINT8      *Body;
+
+  if (Descriptor == NULL || PartitionNameOut == NULL ||
+      PartitionNameLenOut == NULL || DigestOut == NULL || DigestLenOut == NULL)
+    return EFI_INVALID_PARAMETER;
+  if (DescriptorLen < sizeof (AvbHashDescriptor))
+    return EFI_INVALID_PARAMETER;
+  if (!avb_hash_descriptor_validate_and_byteswap (
+          (CONST AvbHashDescriptor *)Descriptor, &HostDesc))
+    return EFI_INVALID_PARAMETER;
+  if ((UINT64)sizeof (AvbHashDescriptor) + HostDesc.partition_name_len +
+      HostDesc.salt_len + HostDesc.digest_len > DescriptorLen)
+    return EFI_INVALID_PARAMETER;
+
+  Body = Descriptor + sizeof (AvbHashDescriptor);
+  *PartitionNameOut    = Body;
+  *PartitionNameLenOut = HostDesc.partition_name_len;
+  *DigestOut           = Body + HostDesc.partition_name_len + HostDesc.salt_len;
+  *DigestLenOut        = HostDesc.digest_len;
+  return EFI_SUCCESS;
+}
+
+STATIC EFI_STATUS
+AvbParse_ChainPartitionDescriptor (
+  IN  CONST UINT8   *Descriptor,
+  IN  UINT64         DescriptorLen,
+  OUT CONST UINT8  **PartitionNameOut,
+  OUT UINT32        *PartitionNameLenOut,
+  OUT CONST UINT8  **PublicKeyOut,
+  OUT UINT32        *PublicKeyLenOut
+  )
+{
+  AvbChainPartitionDescriptor HostDesc;
+  CONST UINT8                *Body;
+
+  if (Descriptor == NULL || PartitionNameOut == NULL ||
+      PartitionNameLenOut == NULL || PublicKeyOut == NULL || PublicKeyLenOut == NULL)
+    return EFI_INVALID_PARAMETER;
+  if (DescriptorLen < sizeof (AvbChainPartitionDescriptor))
+    return EFI_INVALID_PARAMETER;
+  if (!avb_chain_partition_descriptor_validate_and_byteswap (
+          (CONST AvbChainPartitionDescriptor *)Descriptor, &HostDesc))
+    return EFI_INVALID_PARAMETER;
+  if ((UINT64)sizeof (AvbChainPartitionDescriptor) +
+      HostDesc.partition_name_len + HostDesc.public_key_len > DescriptorLen)
+    return EFI_INVALID_PARAMETER;
+
+  Body = Descriptor + sizeof (AvbChainPartitionDescriptor);
+  *PartitionNameOut    = Body;
+  *PartitionNameLenOut = HostDesc.partition_name_len;
+  *PublicKeyOut        = Body + HostDesc.partition_name_len;
+  *PublicKeyLenOut     = HostDesc.public_key_len;
+  return EFI_SUCCESS;
+}
 
 /* Descriptor type tags seen in the walk */
 typedef enum {
@@ -4968,7 +5189,7 @@ GblGetVarVbmetaDigest (VOID)
   EFI_STATUS       Status;
   UINT8           *Buf  = NULL;
   UINT64           Size = 0;
-  GBL_AvbSHA256Ctx Ctx;
+  AvbSHA256Ctx     Ctx;
   UINT8           *Digest;
   CHAR8            Long[GBL_VBMETA_HEX_LEN];  /* 65 bytes — fits 32-byte digest */
 
@@ -5045,7 +5266,7 @@ GblGetVarVbmetaPartStatus (IN CONST CHAR8 *PartName,
     UINT8                 *PartBuf  = NULL;
     UINT64                 PartSize = 0;
     UINT64                 ReadBytes;
-    GBL_AvbSHA256Ctx       Ctx;
+    AvbSHA256Ctx           Ctx;
     UINT8                 *Computed;
     CONST CHAR8           *Result = "ok";
 
@@ -5133,10 +5354,24 @@ GblGetVarVbmetaPartStatus (IN CONST CHAR8 *PartName,
       return;
     }
 
-    if (EFI_ERROR (AvbParse_Footer (PartBuf, PartSize, &ChainFooter)))
+    if (EFI_ERROR (AvbParse_Footer (PartBuf, PartSize, &ChainFooter))) {
       AsciiStrnCpyS (Out, OutCap, "unsigned", OutCap - 1);
-    else
-      AsciiStrnCpyS (Out, OutCap, "ok", OutCap - 1);
+    } else {
+      GBL_AVB_VBMETA_HEADER ChainVbHdr;
+
+      if (ChainFooter.VbmetaOffset < PartSize &&
+          ChainFooter.VbmetaSize > 0 &&
+          !EFI_ERROR (AvbParse_VbmetaHeader (
+              PartBuf + ChainFooter.VbmetaOffset,
+              ChainFooter.VbmetaSize, &ChainVbHdr))) {
+        if (ChainVbHdr.AlgorithmType == 0)
+          AsciiStrnCpyS (Out, OutCap, "not-grafted", OutCap - 1);
+        else
+          AsciiStrnCpyS (Out, OutCap, "ok", OutCap - 1);
+      } else {
+        AsciiStrnCpyS (Out, OutCap, "bad-footer", OutCap - 1);
+      }
+    }
 
     FreePool (PartBuf);
     FreePool (VbmBuf);
@@ -5226,16 +5461,16 @@ GblGetVarVbmetaPartExpected (IN CONST CHAR8 *PartName)
     /* Fingerprint the pubkey via SHA-256 to avoid a ~2KB hex dump that
      * saturates the USB transfer pool on canoe and wedges fastboot.
      * Output: 64 hex chars (32-byte digest), same as vbmeta:digest. */
-    GBL_AvbSHA256Ctx Ctx;
-    UINT8            Fingerprint[GBL_AVB_SHA256_DIGEST_SIZE];
+    AvbSHA256Ctx     Ctx;
+    UINT8            Fingerprint[GBL_VBMETA_SHA256_LEN];
     CHAR8            Long[GBL_VBMETA_HEX_LEN];
     UINT8           *FpPtr;
 
     avb_sha256_init   (&Ctx);
     avb_sha256_update (&Ctx, PubKey, PubKeyLen);
     FpPtr = avb_sha256_final (&Ctx);
-    CopyMem (Fingerprint, FpPtr, GBL_AVB_SHA256_DIGEST_SIZE);
-    GblVbmetaHexDump (Fingerprint, GBL_AVB_SHA256_DIGEST_SIZE, Long, sizeof (Long));
+    CopyMem (Fingerprint, FpPtr, GBL_VBMETA_SHA256_LEN);
+    GblVbmetaHexDump (Fingerprint, GBL_VBMETA_SHA256_LEN, Long, sizeof (Long));
     FreePool (VbmBuf);
     GblFastbootRespondLong (Long);
   } else {
@@ -5278,7 +5513,7 @@ GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName)
     UINT8                 *PartBuf  = NULL;
     UINT64                 PartSize = 0;
     UINT64                 ReadBytes;
-    GBL_AvbSHA256Ctx       Ctx;
+    AvbSHA256Ctx           Ctx;
     UINT8                 *Computed;
     CHAR8                  Long[GBL_VBMETA_HEX_LEN];
 
@@ -5511,7 +5746,7 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
       UINT8                 *PartBuf  = NULL;
       UINT64                 PartSize = 0;
       UINT64                 ReadBytes;
-      GBL_AvbSHA256Ctx       Ctx;
+      AvbSHA256Ctx           Ctx;
       UINT8                 *Computed;
 
       DescType = "hash";
@@ -5585,10 +5820,24 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
             FreePool (PartBuf);
             RowStatus = "error";
           } else {
-            if (EFI_ERROR (AvbParse_Footer (PartBuf, PartSize, &ChainFooter)))
+            if (EFI_ERROR (AvbParse_Footer (PartBuf, PartSize, &ChainFooter))) {
               RowStatus = "unsigned";
-            else
-              RowStatus = "ok";
+            } else {
+              GBL_AVB_VBMETA_HEADER ChainVbHdr;
+
+              if (ChainFooter.VbmetaOffset < PartSize &&
+                  ChainFooter.VbmetaSize > 0 &&
+                  !EFI_ERROR (AvbParse_VbmetaHeader (
+                      PartBuf + ChainFooter.VbmetaOffset,
+                      ChainFooter.VbmetaSize, &ChainVbHdr))) {
+                if (ChainVbHdr.AlgorithmType == 0)
+                  RowStatus = "not-grafted";
+                else
+                  RowStatus = "ok";
+              } else {
+                RowStatus = "bad-footer";
+              }
+            }
             FreePool (PartBuf);
           }
         }
@@ -5614,7 +5863,7 @@ CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 
   /* ---- summary: vbmeta SHA-256 digest (64 hex chars, use chunking) ------ */
   {
-    GBL_AvbSHA256Ctx  Ctx;
+    AvbSHA256Ctx      Ctx;
     UINT8            *Digest;
     CHAR8             DigestHex[GBL_VBMETA_HEX_LEN];
 
@@ -5723,7 +5972,8 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
       {"oem escape", CmdOemEscape},
       {"oem rpmb-lock", CmdOemRpmbLock},
       {"oem rpmb-unlock", CmdOemRpmbUnlock},
-      {"oem graft-and-flash", CmdOemGraftAndFlash},
+      {"oem oem-unlock-toggle", CmdOemUnlockToggle},
+      /* {"oem graft-and-flash", CmdOemGraftAndFlash}, */
       {"oem vbmeta-status", CmdOemVbmetaStatus},
 #endif
       {"oem boot-efi", CmdOemBootEfi},
@@ -5753,23 +6003,39 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
   FastbootPublishVar ("serialno", StrSerialNum);
   FastbootPublishVar ("secure", IsSecureBootEnabled () ? "yes" : "no");
 
-  /* gbl-chainload boot-mode getvar: exposes the GBL_MODE this FastbootLib
-     was built with. Used by scripts/test-device-automatic.sh to confirm we
+  /* gbl-chainload getvars: expose build identity for scripts and diagnostics.
+     scripts/test-device-automatic.sh uses gbl-chainload_mode to confirm we
      landed in our FastbootLib (not stock) and identify the mode. */
 #ifdef GBL_MODE
 #if (GBL_MODE == 0)
-  FastbootPublishVar ("boot-mode", "gbl-mode-0");
+  FastbootPublishVar ("gbl-chainload_mode", "mode-0");
 #elif (GBL_MODE == 1)
-  FastbootPublishVar ("boot-mode", "gbl-mode-1");
+  FastbootPublishVar ("gbl-chainload_mode", "mode-1");
 #elif (GBL_MODE == 2)
-  FastbootPublishVar ("boot-mode", "gbl-mode-2");
+  FastbootPublishVar ("gbl-chainload_mode", "mode-2");
 #elif (GBL_MODE == 3)
-  FastbootPublishVar ("boot-mode", "gbl-mode-3");
+  FastbootPublishVar ("gbl-chainload_mode", "mode-3");
 #else
-  FastbootPublishVar ("boot-mode", "gbl-mode-unknown");
+  FastbootPublishVar ("gbl-chainload_mode", "unknown");
 #endif
 #else
-  FastbootPublishVar ("boot-mode", "gbl-mode-undef");
+  FastbootPublishVar ("gbl-chainload_mode", "undef");
+#endif
+  FastbootPublishVar ("gbl-chainload_date", __DATE__ " " __TIME__);
+#ifdef GBL_AUTO
+  FastbootPublishVar ("gbl-chainload_auto", GBL_STR(GBL_AUTO));
+#else
+  FastbootPublishVar ("gbl-chainload_auto", "0");
+#endif
+#ifdef GBL_DEBUG
+  FastbootPublishVar ("gbl-chainload_debug", GBL_STR(GBL_DEBUG));
+#else
+  FastbootPublishVar ("gbl-chainload_debug", "0");
+#endif
+#ifdef GBL_VERBOSE
+  FastbootPublishVar ("gbl-chainload_verbose", GBL_STR(GBL_VERBOSE));
+#else
+  FastbootPublishVar ("gbl-chainload_verbose", "0");
 #endif
 
   if (MultiSlotBoot) {
@@ -5868,6 +6134,8 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
     DEBUG ((EFI_D_ERROR, "Error Reading FRP partition: %r\n", Status));
     return Status;
   }
+
+  FastbootPublishVar ("oem-unlock-allowed", IsAllowUnlock ? "yes" : "no");
 
   return EFI_SUCCESS;
 }

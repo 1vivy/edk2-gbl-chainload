@@ -152,12 +152,21 @@ STATIC MENU_MSG_INFO mFastbootOptionTitle[] = {
      0,
      POWEROFF},
     {{"Boot to Alternate Slot"},
-      BIG_FACTOR,
-      BGR_RED,
-      BGR_BLACK,
-      OPTION_ITEM,
-      0,
-      ALTERNATESLOT},
+       BIG_FACTOR,
+       BGR_RED,
+       BGR_BLACK,
+       OPTION_ITEM,
+       0,
+       ALTERNATESLOT},
+#if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
+    {{"Escape"},
+       BIG_FACTOR,
+       BGR_YELLOW,
+       BGR_BLACK,
+       OPTION_ITEM,
+       0,
+       ESCAPE},
+#endif
 };
 
 STATIC MENU_MSG_INFO mFastbootCommonWarnMsgInfo[] = {
@@ -247,13 +256,6 @@ STATIC MENU_MSG_INFO mFastbootCommonMsgInfo[] = {
      COMMON,
      0,
      NOACTION},
-    {{"PRIMARY BOOT OS - "},
-     COMMON_FACTOR,
-     BGR_CYAN,
-     BGR_BLACK,
-     COMMON,
-     0,
-     NOACTION},
     {{"gbl-chainload"},
      COMMON_FACTOR,
      BGR_GREEN,
@@ -268,7 +270,7 @@ STATIC MENU_MSG_INFO mFastbootCommonMsgInfo[] = {
      COMMON,
      0,
      NOACTION},
-    {{"BUILD - " __DATE__ " " __TIME__},
+    {{"DATE - " __DATE__ " " __TIME__},
      COMMON_FACTOR,
      BGR_GREEN,
      BGR_BLACK,
@@ -515,26 +517,6 @@ FastbootMenuShowScreen (OPTION_MENU_INFO *OptionMenuInfo)
           AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
                       sizeof (mFastbootCommonMsgInfo[i].Msg), "not found",
                       AsciiStrLen ("not found"));
-        }
-        break;
-      case 9:
-        /* Get boot path status */
-        switch (ReadBootPath ()) {
-          case BOOT_PATH_ANDROID:
-            AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
-                          sizeof (mFastbootCommonMsgInfo[i].Msg), "Android",
-                          AsciiStrLen ("Android"));
-            break;
-          case BOOT_PATH_ESP:
-            AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
-                          sizeof (mFastbootCommonMsgInfo[i].Msg), "Linux",
-                          AsciiStrLen ("Linux"));
-            break;
-          default:
-            AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
-                          sizeof (mFastbootCommonMsgInfo[i].Msg), "Unknown",
-                          AsciiStrLen ("Unknown"));
-            break;
         }
         break;
       }

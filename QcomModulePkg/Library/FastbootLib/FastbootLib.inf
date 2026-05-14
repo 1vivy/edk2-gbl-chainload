@@ -149,7 +149,7 @@
   DebugLib
   UbsanLib
   CompilerIntrinsicsLib
-  AvbParseLib
+  AvbLib
 
 [Protocols]
   gEfiSimpleTextInProtocolGuid
