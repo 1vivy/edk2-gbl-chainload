@@ -80,7 +80,13 @@
 #include <Library/VerifiedBootMenu.h>
 #include <Library/Board.h>
 #include <Library/BootESP.h>
+
+extern EFI_STATUS GblFastbootEnableOemUnlockAllowed (VOID);
 #include <Uefi.h>
+
+#if defined (AUTO_DEBUG_MODE) || defined (MODE_DEBUG) || defined (MODE_TEMPLATE) || defined (FAKELOCKED) || defined (FAKELOCKED_DEBUG)
+#define GBL_EXPERIMENTAL_FASTBOOT_CMDS 1
+#endif
 
 #include <Protocol/EFIVerifiedBoot.h>
 
@@ -219,6 +225,13 @@ UpdateDeviceStatus (OPTION_MENU_INFO *MsgInfo, INTN Reason)
       DEBUG ((EFI_D_WARN, "Escape chainload returned, back to fastboot menu\n"));
       break;
     }
+  case OEMUNLOCKENABLE:
+    Status = GblFastbootEnableOemUnlockAllowed ();
+    DEBUG ((EFI_ERROR (Status) ? EFI_D_ERROR : EFI_D_INFO,
+            "Enable OEM unlock allowed from menu: %r\n", Status));
+    ExitMenuKeysDetection ();
+    DisplayFastbootMenu ();
+    break;
   }
 }
 

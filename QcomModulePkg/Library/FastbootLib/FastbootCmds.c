@@ -54,7 +54,6 @@ found at
 
 #include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
-#include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
 #include <Library/Debug.h>
 #include <Library/DeviceInfo.h>
@@ -104,16 +103,12 @@ EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
 #include "Recovery.h"
 
 #if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
-typedef AvbFooter            GBL_AVB_FOOTER;
 typedef AvbVBMetaImageHeader GBL_AVB_VBMETA_HEADER;
 typedef AvbDescriptorTag     GBL_AVB_DESCRIPTOR_TAG;
 
 #define GBL_AVB_VBMETA_HEADER_SIZE AVB_VBMETA_IMAGE_HEADER_SIZE
 
-/* Field-name compatibility for the old local AvbParseLib structs. */
-#define VbmetaOffset                  vbmeta_offset
-#define VbmetaSize                    vbmeta_size
-#define OriginalImageSize             original_image_size
+/* Short aliases used by this file's libavb-backed descriptor walker. */
 #define AvbMajorVersion               required_libavb_version_major
 #define AvbMinorVersion               required_libavb_version_minor
 #define AlgorithmType                 algorithm_type
@@ -124,10 +119,9 @@ typedef AvbDescriptorTag     GBL_AVB_DESCRIPTOR_TAG;
 #define GblAvbDescHashTag             AVB_DESCRIPTOR_TAG_HASH
 #define GblAvbDescChainPartitionTag   AVB_DESCRIPTOR_TAG_CHAIN_PARTITION
 
-STATIC EFI_STATUS AvbParse_Footer (IN CONST UINT8 *Partition, IN UINT64 PartitionSize, OUT GBL_AVB_FOOTER *FooterOut);
 STATIC EFI_STATUS AvbParse_VbmetaHeader (IN CONST UINT8 *Vbmeta, IN UINT64 VbmetaSize, OUT GBL_AVB_VBMETA_HEADER *HeaderOut);
 STATIC EFI_STATUS AvbParse_NextDescriptor (IN CONST UINT8 *AuxBlock, IN UINT64 AuxSize, IN OUT UINT64 *Cursor, OUT GBL_AVB_DESCRIPTOR_TAG *TagOut, OUT CONST UINT8 **DescriptorOut, OUT UINT64 *DescriptorLenOut);
-STATIC EFI_STATUS AvbParse_HashDescriptor (IN CONST UINT8 *Descriptor, IN UINT64 DescriptorLen, OUT CONST UINT8 **PartitionNameOut, OUT UINT32 *PartitionNameLenOut, OUT CONST UINT8 **DigestOut, OUT UINT32 *DigestLenOut);
+STATIC EFI_STATUS AvbParse_HashDescriptor (IN CONST UINT8 *Descriptor, IN UINT64 DescriptorLen, OUT CONST UINT8 **PartitionNameOut, OUT UINT32 *PartitionNameLenOut, OUT CONST UINT8 **DigestOut, OUT UINT32 *DigestLenOut, OUT CONST UINT8 **SaltOut, OUT UINT32 *SaltLenOut, OUT UINT64 *ImageSizeOut);
 STATIC EFI_STATUS AvbParse_ChainPartitionDescriptor (IN CONST UINT8 *Descriptor, IN UINT64 DescriptorLen, OUT CONST UINT8 **PartitionNameOut, OUT UINT32 *PartitionNameLenOut, OUT CONST UINT8 **PublicKeyOut, OUT UINT32 *PublicKeyLenOut);
 #endif
 
@@ -170,6 +164,7 @@ STATIC CHAR8 LogicalBlkSizeStr[MAX_RSP_SIZE];
 STATIC CHAR8 EraseBlkSizeStr[MAX_RSP_SIZE];
 STATIC CHAR8 MaxDownloadSizeStr[MAX_RSP_SIZE];
 STATIC CHAR8 SnapshotMergeState[MAX_RSP_SIZE];
+STATIC CHAR8 OemUnlockAllowedValue[MAX_RSP_SIZE];
 
 struct GetVarSlotInfo {
   CHAR8 SlotSuffix[MAX_SLOT_SUFFIX_SZ];
@@ -3100,7 +3095,7 @@ STATIC VOID CmdGetVarAll (VOID)
 
 #if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
 /* Forward declaration — defined later in the GBL_EXPERIMENTAL block */
-STATIC BOOLEAN GblCmdGetVarVbmeta (IN CONST CHAR8 *Arg);
+STATIC VOID GblPublishVbmetaVars (VOID);
 #endif
 
 STATIC VOID
@@ -3147,14 +3142,6 @@ CmdGetVar (CONST CHAR8 *Arg, VOID *Data, UINT32 Size)
       return;
     }
   }
-
-#if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
-  /* Handle dynamic vbmeta:* variables */
-  if (AsciiStrnCmp (Arg, "vbmeta:", AsciiStrLen ("vbmeta:")) == 0) {
-    if (GblCmdGetVarVbmeta (Arg))
-      return;
-  }
-#endif
 
   FastbootFail ("GetVar Variable Not found");
 }
@@ -4307,6 +4294,22 @@ Exit:
   return Status;
 }
 
+STATIC VOID
+UpdateOemUnlockAllowedVar (VOID)
+{
+  AsciiSPrint (OemUnlockAllowedValue, sizeof (OemUnlockAllowedValue), "%a",
+               IsAllowUnlock ? "yes" : "no");
+}
+
+EFI_STATUS
+GblFastbootReadOemUnlockAllowed (OUT UINT32 *Allowed)
+{
+  if (Allowed == NULL)
+    return EFI_INVALID_PARAMETER;
+
+  return ReadAllowUnlockValue (Allowed);
+}
+
 /* `oem boot-efi`: LoadImage + StartImage on the contents of the staging
  * buffer. Android `fastboot stage` is just `download:` on the wire — the
  * payload lands in mUsbDataBuffer (set by CmdDownload). The pointer swap
@@ -4352,6 +4355,7 @@ CmdOemBootEfi (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   AsciiSPrint (Resp, sizeof (Resp),
                "loading staged %llu bytes", mFlashNumDataBytes);
   FastbootInfo (Resp);
+  WaitForTransferComplete ();
 
   Status = gBS->LoadImage (FALSE, gImageHandle, NULL,
                            mFlashDataBuffer, mFlashNumDataBytes,
@@ -4362,11 +4366,10 @@ CmdOemBootEfi (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
     return;
   }
 
-  /* Tear down USB cleanly before handing off — mirrors CmdContinue/CmdBoot.
-   * Without FastbootUsbDeviceStop the host sees "Status read failed" because
-   * the USB device disappears mid-protocol. */
+  /* Exit keys' detection and wait for OKAY to reach the host before USB handoff. */
   ExitMenuKeysDetection ();
-  FastbootOkay ("started");
+  FastbootOkay ("");
+  WaitForTransferComplete ();
   FastbootUsbDeviceStop ();
   Finished = TRUE;
 
@@ -4506,37 +4509,48 @@ WriteAllowUnlockValue (UINT32 Value)
 
   if (!EFI_ERROR (Status)) {
     IsAllowUnlock = Value & 0x01;
+    UpdateOemUnlockAllowedVar ();
   }
 
   return Status;
 }
 
+EFI_STATUS
+GblFastbootEnableOemUnlockAllowed (VOID)
+{
+  return WriteAllowUnlockValue (1);
+}
+
 /*
  * CmdOemUnlockToggle — `fastboot oem oem-unlock-toggle`
  *
- * Toggles the OEM unlock allowed bit in the FRP partition.
+ * Enables the OEM unlock allowed bit in the FRP partition.  This command name
+ * is kept for compatibility with existing test scripts, but it is intentionally
+ * one-way so an accidental second invocation does not disable OEM unlocking.
  */
 STATIC VOID
 CmdOemUnlockToggle (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
 {
   EFI_STATUS Status;
   CHAR8 Resp[MAX_RSP_SIZE];
-  UINT32 NewValue = IsAllowUnlock ? 0 : 1;
 
-  Status = WriteAllowUnlockValue (NewValue);
+  if (IsAllowUnlock) {
+    FastbootOkay ("OEM unlock already enabled");
+    return;
+  }
+
+  Status = GblFastbootEnableOemUnlockAllowed ();
   if (EFI_ERROR (Status)) {
     AsciiSPrint (Resp, sizeof (Resp), "Failed to write FRP: %r", Status);
     FastbootFail (Resp);
     return;
   }
 
-  AsciiSPrint (Resp, sizeof (Resp), "OEM unlock %a",
-               NewValue ? "enabled" : "disabled");
-  FastbootOkay (Resp);
+  FastbootOkay ("OEM unlock enabled");
 }
 
 /*
- * LocatePartitionForGraft — resolve BlockIo + Handle for a bare partition
+ * LocateActiveSlotPartition — resolve BlockIo + Handle for a bare partition
  * root name (e.g. "recovery", "dtbo").  On a multi-slot device the active-slot
  * suffixed name is tried first (_a or _b); the bare name is the fallback for
  * partitions that have no A/B variants.
@@ -4545,7 +4559,7 @@ CmdOemUnlockToggle (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
  * written to ResolvedName (caller provides MAX_GPT_NAME_SIZE chars).
  */
 STATIC EFI_STATUS
-LocatePartitionForGraft (
+LocateActiveSlotPartition (
   IN  CONST CHAR8          *RootNameAscii,
   OUT EFI_BLOCK_IO_PROTOCOL **BlockIoOut,
   OUT EFI_HANDLE           **HandleOut,
@@ -4575,274 +4589,38 @@ LocatePartitionForGraft (
   return Status;
 }
 
-/*
- * `oem graft-and-flash <partition> [commit]`
- *
- * Takes the image already staged via `fastboot stage` (the same buffer that
- * `flash:` uses), validates that the on-disk partition carries a stock AVB
- * footer, and grafts the donor's vbmeta tail onto the staged image before
- * writing it back.  Without the literal word "commit" the command is a
- * dry-run: it validates and reports but does not write.
- *
- * Supported partitions: recovery, dtbo.
- *
- * Workflow:
- *   fastboot stage <new-recovery.img>
- *   fastboot oem graft-and-flash recovery          # dry-run
- *   fastboot oem graft-and-flash recovery commit   # live write
- */
-STATIC VOID
-CmdOemGraftAndFlash (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
-{
-  EFI_STATUS              Status;
-  CHAR8                   Resp[256];
-  CHAR8                   PartName[MAX_GPT_NAME_SIZE];  /* ascii root name  */
-  CONST CHAR8            *ArgPtr;
-  BOOLEAN                 DoCommit = FALSE;
-
-  EFI_BLOCK_IO_PROTOCOL  *BlockIo = NULL;
-  EFI_HANDLE             *Handle  = NULL;
-  CHAR16                  ResolvedName[MAX_GPT_NAME_SIZE];
-
-  UINT64                  PartSize = 0;
-  UINT8                  *PartBuf  = NULL;
-
-  GBL_AVB_FOOTER          Footer;
-  GBL_AVB_VBMETA_HEADER   VbHdr;
-
-  UINT64                  TailOffset;
-  UINT64                  TailBytes;
-  UINT64                  BlockSize;
-  UINT64                  ReadLba;
-  UINT64                  ReadBytes;
-
-  /* ---- exchange staging buffer (mirrors CmdFlash / CmdOemBootEfi) ---- */
-  ExchangeFlashAndUsbDataBuf ();
-
-  if (mFlashDataBuffer == NULL || mFlashNumDataBytes == 0) {
-    FastbootFail ("no staged image -- run `fastboot stage <file>` first");
-    return;
-  }
-
-  /* ---- parse args: "<partition> [commit]" ---- */
-  /* Skip leading spaces */
-  ArgPtr = Arg;
-  while (*ArgPtr == ' ')
-    ArgPtr++;
-
-  /* Copy partition root name (up to first space or NUL) */
-  UINT32 NameLen = 0;
-  while (ArgPtr[NameLen] != '\0' && ArgPtr[NameLen] != ' ' &&
-         NameLen < sizeof (PartName) - 1)
-    NameLen++;
-
-  if (NameLen == 0) {
-    FastbootFail ("usage: oem graft-and-flash <partition> [commit]");
-    return;
-  }
-  AsciiStrnCpyS (PartName, sizeof (PartName), ArgPtr, NameLen);
-
-  /* Check for "commit" keyword after the partition name */
-  CONST CHAR8 *Rest = ArgPtr + NameLen;
-  while (*Rest == ' ')
-    Rest++;
-  if (AsciiStrCmp (Rest, "commit") == 0)
-    DoCommit = TRUE;
-
-  /* ---- validate partition is supported ---- */
-  if (AsciiStrCmp (PartName, "recovery") != 0 &&
-      AsciiStrCmp (PartName, "dtbo") != 0) {
-    AsciiSPrint (Resp, sizeof (Resp),
-                 "unsupported partition '%a' (recovery|dtbo only)", PartName);
-    FastbootFail (Resp);
-    return;
-  }
-
-  /* ---- locate on-disk partition ---- */
-  Status = LocatePartitionForGraft (PartName, &BlockIo, &Handle,
-                                    ResolvedName, ARRAY_SIZE (ResolvedName));
-  if (EFI_ERROR (Status) || BlockIo == NULL) {
-    AsciiSPrint (Resp, sizeof (Resp),
-                 "partition '%a' not found: %r", PartName, Status);
-    FastbootFail (Resp);
-    return;
-  }
-
-  PartSize = GetPartitionSize (BlockIo);
-  if (PartSize == 0) {
-    FastbootFail ("could not determine partition size");
-    return;
-  }
-
-  /* ---- read the entire on-disk partition ---- */
-  BlockSize   = BlockIo->Media->BlockSize;
-  ReadBytes   = (PartSize + BlockSize - 1) & ~(BlockSize - 1); /* round up */
-
-  PartBuf = AllocatePool (ReadBytes);
-  if (PartBuf == NULL) {
-    FastbootFail ("AllocatePool failed for partition read buffer");
-    return;
-  }
-
-  ReadLba = 0;
-  Status  = BlockIo->ReadBlocks (BlockIo, BlockIo->Media->MediaId,
-                                 ReadLba, ReadBytes, PartBuf);
-  if (EFI_ERROR (Status)) {
-    AsciiSPrint (Resp, sizeof (Resp), "ReadBlocks failed: %r", Status);
-    FastbootFail (Resp);
-    FreePool (PartBuf);
-    return;
-  }
-
-  /* ---- parse AVB footer (last GBL_AVB_FOOTER_SIZE bytes of partition) ---- */
-  Status = AvbParse_Footer (PartBuf, PartSize, &Footer);
-  if (EFI_ERROR (Status)) {
-    FastbootFail ("partition lacks stock vbmeta footer (not a stock image?)");
-    FreePool (PartBuf);
-    return;
-  }
-
-  /* ---- validate vbmeta header at footer-indicated offset ---- */
-  if (Footer.VbmetaOffset >= PartSize ||
-      Footer.VbmetaSize   == 0       ||
-      Footer.VbmetaOffset + Footer.VbmetaSize > PartSize) {
-    FastbootFail ("footer vbmeta_offset/size out of partition bounds");
-    FreePool (PartBuf);
-    return;
-  }
-
-  Status = AvbParse_VbmetaHeader (PartBuf + Footer.VbmetaOffset,
-                                  Footer.VbmetaSize, &VbHdr);
-  if (EFI_ERROR (Status)) {
-    FastbootFail ("invalid AVB vbmeta header at footer offset");
-    FreePool (PartBuf);
-    return;
-  }
-
-  /* ---- staged image must be at least as large as the target partition ---- */
-  if (mFlashNumDataBytes < PartSize) {
-    AsciiSPrint (Resp, sizeof (Resp),
-                 "staged image (%llu B) < partition size (%llu B) -- too small",
-                 mFlashNumDataBytes, PartSize);
-    FastbootFail (Resp);
-    FreePool (PartBuf);
-    return;
-  }
-
-  /* ---- magic check on staged image ---- */
-  if (AsciiStrCmp (PartName, "recovery") == 0) {
-    /* Android boot/recovery magic: "ANDROID!" at byte 0 */
-    if (AsciiStrnCmp ((CONST CHAR8 *)mFlashDataBuffer, "ANDROID!", 8) != 0) {
-      FastbootFail ("staged image missing ANDROID! magic (not a recovery image)");
-      FreePool (PartBuf);
-      return;
-    }
-  } else if (AsciiStrCmp (PartName, "dtbo") == 0) {
-    /* Accept FDT magic (0xD00DFEED) or DTBO table magic (0xD7B7AB1E) */
-    UINT32 Magic32;
-    CopyMem (&Magic32, mFlashDataBuffer, sizeof (UINT32));
-    /* Both constants are big-endian on-disk; compare raw bytes */
-    if (Magic32 != 0xEDFE0DD0 && /* 0xD00DFEED in little-endian */
-        Magic32 != 0x1EABB7D7) { /* 0xD7B7AB1E in little-endian */
-      FastbootFail ("staged image missing FDT/DTBO magic (not a dtbo image)");
-      FreePool (PartBuf);
-      return;
-    }
-  }
-
-  /* ---- info lines ---- */
-  AsciiSPrint (Resp, sizeof (Resp),
-               "donor footer: vbmeta_offset=%llu vbmeta_size=%llu orig_image_size=%llu",
-               Footer.VbmetaOffset, Footer.VbmetaSize, Footer.OriginalImageSize);
-  FastbootInfo (Resp);
-  WaitForTransferComplete ();
-
-  AsciiSPrint (Resp, sizeof (Resp),
-               "donor header: avb %u.%u algo=%u auth_size=%llu aux_size=%llu",
-               VbHdr.AvbMajorVersion, VbHdr.AvbMinorVersion,
-               VbHdr.AlgorithmType,
-               VbHdr.AuthenticationDataBlockSize,
-               VbHdr.AuxiliaryDataBlockSize);
-  FastbootInfo (Resp);
-  WaitForTransferComplete ();
-
-  AsciiSPrint (Resp, sizeof (Resp),
-               "target part=%llu B  staged=%llu B",
-               PartSize, mFlashNumDataBytes);
-  FastbootInfo (Resp);
-  WaitForTransferComplete ();
-
-  /* ---- dry-run exit ---- */
-  if (!DoCommit) {
-    FreePool (PartBuf);
-    FastbootInfo ("DRY RUN -- re-issue with 'commit' to write");
-    WaitForTransferComplete ();
-    FastbootOkay ("");
-    return;
-  }
-
-  /* ---- graft: copy donor tail (vbmeta + padding) onto staged image ---- */
-  TailOffset = Footer.VbmetaOffset;
-  TailBytes  = PartSize - TailOffset;   /* from vbmeta start to partition end */
-
-  /* Bounds check: staged buffer must have room for the tail */
-  if (TailOffset + TailBytes > mFlashNumDataBytes) {
-    AsciiSPrint (Resp, sizeof (Resp),
-                 "staged buffer too small for graft tail (need %llu B at +%llu)",
-                 TailBytes, TailOffset);
-    FastbootFail (Resp);
-    FreePool (PartBuf);
-    return;
-  }
-
-  CopyMem (mFlashDataBuffer + TailOffset, PartBuf + TailOffset, TailBytes);
-  FreePool (PartBuf);
-  PartBuf = NULL;
-
-  /* ---- write grafted image to partition ---- */
-  Status = WriteBlockToPartition (BlockIo, Handle, 0, PartSize, mFlashDataBuffer);
-  if (EFI_ERROR (Status)) {
-    AsciiSPrint (Resp, sizeof (Resp), "WriteBlockToPartition failed: %r", Status);
-    FastbootFail (Resp);
-    return;
-  }
-
-  AsciiSPrint (Resp, sizeof (Resp),
-               "grafted %s: replaced last %llu bytes (vbmeta tail from stock)",
-               ResolvedName, TailBytes);
-  FastbootOkay (Resp);
-}
-
 /* -------------------------------------------------------------------------
- * getvar vbmeta:* handlers
+ * Lightweight vbmeta diagnostics
  *
- * Use libavb's canonical footer/vbmeta/descriptor helpers.  Keep a small
- * compatibility shim for the local debug code so the backend is libavb while
- * the table/report logic remains compact.
+ * These are normal published fastboot vars, so `fastboot getvar all` sees them
+ * without a special dynamic getvar path.  Keep the probe metadata-only: read
+ * the active vbmeta partition once, walk descriptors, and report whether the
+ * initial boot images are described/chained.  Do not hash whole boot images in
+ * fastboot/menu setup.
  * -------------------------------------------------------------------------
  */
-#define GBL_VBMETA_SHA256_LEN  AVB_SHA256_DIGEST_SIZE
-#define GBL_VBMETA_HEX_LEN    65   /* 32*2 + NUL */
 
-STATIC EFI_STATUS
-AvbParse_Footer (
-  IN  CONST UINT8     *Partition,
-  IN  UINT64           PartitionSize,
-  OUT GBL_AVB_FOOTER  *FooterOut
-  )
-{
-  if (Partition == NULL || FooterOut == NULL)
-    return EFI_INVALID_PARAMETER;
-  if (PartitionSize < AVB_FOOTER_SIZE)
-    return EFI_INVALID_PARAMETER;
-  if (!avb_footer_validate_and_byteswap (
-          (CONST AvbFooter *)(Partition + PartitionSize - AVB_FOOTER_SIZE),
-          FooterOut))
-    return EFI_NOT_FOUND;
-  if (FooterOut->vbmeta_offset + FooterOut->vbmeta_size > PartitionSize)
-    return EFI_INVALID_PARAMETER;
-  return EFI_SUCCESS;
-}
+typedef struct {
+  CONST CHAR8        *Name;
+  CONST CHAR8        *VarStatusName;
+  CONST CHAR8        *VarDescName;
+  CHAR8               Status[MAX_RSP_SIZE];
+  CHAR8               DescType[MAX_RSP_SIZE];
+} GBL_VBMETA_PART_VAR;
+
+STATIC CHAR8 mVbmetaSlot[MAX_RSP_SIZE]         = "unknown";
+STATIC CHAR8 mVbmetaWarning[MAX_RSP_SIZE]      = "none";
+STATIC CHAR8 mVbmetaCapabilities[MAX_RSP_SIZE] = "slot,status,descriptor-type,warning";
+
+STATIC GBL_VBMETA_PART_VAR mVbmetaPartVars[] = {
+  {"boot",          "vbmeta:boot:status",          "vbmeta:boot:descriptor-type",          "unknown", "unknown"},
+  {"init_boot",     "vbmeta:init_boot:status",     "vbmeta:init_boot:descriptor-type",     "unknown", "unknown"},
+  {"vendor_boot",   "vbmeta:vendor_boot:status",   "vbmeta:vendor_boot:descriptor-type",   "unknown", "unknown"},
+  {"recovery",      "vbmeta:recovery:status",      "vbmeta:recovery:descriptor-type",      "unknown", "unknown"},
+  {"dtbo",          "vbmeta:dtbo:status",          "vbmeta:dtbo:descriptor-type",          "unknown", "unknown"},
+  {"vbmeta_system", "vbmeta:vbmeta_system:status", "vbmeta:vbmeta_system:descriptor-type", "unknown", "unknown"},
+  {"vbmeta_vendor", "vbmeta:vbmeta_vendor:status", "vbmeta:vbmeta_vendor:descriptor-type", "unknown", "unknown"},
+};
 
 STATIC EFI_STATUS
 AvbParse_VbmetaHeader (
@@ -4910,7 +4688,10 @@ AvbParse_HashDescriptor (
   OUT CONST UINT8  **PartitionNameOut,
   OUT UINT32        *PartitionNameLenOut,
   OUT CONST UINT8  **DigestOut,
-  OUT UINT32        *DigestLenOut
+  OUT UINT32        *DigestLenOut,
+  OUT CONST UINT8  **SaltOut OPTIONAL,
+  OUT UINT32        *SaltLenOut OPTIONAL,
+  OUT UINT64        *ImageSizeOut OPTIONAL
   )
 {
   AvbHashDescriptor HostDesc;
@@ -4933,6 +4714,12 @@ AvbParse_HashDescriptor (
   *PartitionNameLenOut = HostDesc.partition_name_len;
   *DigestOut           = Body + HostDesc.partition_name_len + HostDesc.salt_len;
   *DigestLenOut        = HostDesc.digest_len;
+  if (SaltOut != NULL)
+    *SaltOut = Body + HostDesc.partition_name_len;
+  if (SaltLenOut != NULL)
+    *SaltLenOut = HostDesc.salt_len;
+  if (ImageSizeOut != NULL)
+    *ImageSizeOut = HostDesc.image_size;
   return EFI_SUCCESS;
 }
 
@@ -4977,72 +4764,6 @@ typedef enum {
 } GBL_PART_DESC_TYPE;
 
 /*
- * GblFastbootInfoLong — emit Value across one or more FastbootInfo packets.
- * Does NOT send a trailing OKAY.  Use this to stream rows before a final
- * FastbootOkay("") or as building blocks for GblFastbootRespondLong.
- *
- * FastbootInfo prepends "INFO" automatically, so Chunk must NOT include it.
- * Each INFO packet carries at most MAX_RSP_SIZE - 4 (tag) - 1 (NUL) = 59 chars.
- */
-STATIC VOID
-GblFastbootInfoLong (IN CONST CHAR8 *Value)
-{
-  CHAR8       Chunk[MAX_RSP_SIZE];
-  UINTN       Total      = AsciiStrLen (Value);
-  UINTN       Pos        = 0;
-  CONST UINTN ChunkBytes = MAX_RSP_SIZE - sizeof ("INFO") - 1;  /* = 59 */
-
-  if (Total == 0) {
-    FastbootInfo ("");
-    WaitForTransferComplete ();
-    return;
-  }
-  while (Pos < Total) {
-    UINTN N = Total - Pos;
-    if (N > ChunkBytes)
-      N = ChunkBytes;
-    CopyMem (Chunk, Value + Pos, N);
-    Chunk[N] = '\0';
-    FastbootInfo (Chunk);
-    WaitForTransferComplete ();
-    Pos += N;
-  }
-}
-
-/*
- * GblFastbootRespondLong — emit Value across one or more FastbootInfo packets,
- * then close with FastbootOkay ("").  Use for variables whose value can exceed
- * MAX_RSP_SIZE - sizeof("OKAY") - 1 (= 59 bytes).
- */
-STATIC VOID
-GblFastbootRespondLong (IN CONST CHAR8 *Value)
-{
-  GblFastbootInfoLong (Value);
-  FastbootOkay ("");
-}
-
-/*
- * GblVbmetaHexDump — write Len bytes as lowercase hex into Out.
- * Out must be at least Len*2+1 bytes.  Always NUL-terminates.
- */
-STATIC VOID
-GblVbmetaHexDump (CONST UINT8 *Bytes, UINT32 Len, CHAR8 *Out, UINTN OutCap)
-{
-  STATIC CONST CHAR8 HexChars[] = "0123456789abcdef";
-  UINTN i;
-  UINTN Pos = 0;
-
-  for (i = 0; i < Len && (Pos + 2) < OutCap; i++) {
-    Out[Pos++] = HexChars[(Bytes[i] >> 4) & 0xF];
-    Out[Pos++] = HexChars[Bytes[i] & 0xF];
-  }
-  if (Pos < OutCap)
-    Out[Pos] = '\0';
-  else
-    Out[OutCap - 1] = '\0';
-}
-
-/*
  * GblVbmetaReadActiveSlot — allocate and read the active-slot vbmeta partition.
  * Caller must FreePool(*BufOut) on success.
  */
@@ -5058,7 +4779,7 @@ GblVbmetaReadActiveSlot (OUT UINT8 **BufOut, OUT UINT64 *SizeOut)
   UINT64                  ReadBytes;
   UINT8                  *Buf;
 
-  Status = LocatePartitionForGraft ("vbmeta", &BlockIo, &Handle,
+  Status = LocateActiveSlotPartition ("vbmeta", &BlockIo, &Handle,
                                     ResolvedName, ARRAY_SIZE (ResolvedName));
   if (EFI_ERROR (Status) || BlockIo == NULL)
     return EFI_NOT_FOUND;
@@ -5100,7 +4821,10 @@ GblVbmetaLookupDescriptor (
   OUT CONST UINT8           **DigestOut,
   OUT UINT32                 *DigestLenOut,
   OUT CONST UINT8           **PubKeyOut,
-  OUT UINT32                 *PubKeyLenOut
+  OUT UINT32                 *PubKeyLenOut,
+  OUT CONST UINT8           **SaltOut OPTIONAL,
+  OUT UINT32                 *SaltLenOut OPTIONAL,
+  OUT UINT64                 *HashImageSizeOut OPTIONAL
   )
 {
   EFI_STATUS              Status;
@@ -5121,6 +4845,12 @@ GblVbmetaLookupDescriptor (
   *DigestLenOut = 0;
   *PubKeyOut    = NULL;
   *PubKeyLenOut = 0;
+  if (SaltOut != NULL)
+    *SaltOut = NULL;
+  if (SaltLenOut != NULL)
+    *SaltLenOut = 0;
+  if (HashImageSizeOut != NULL)
+    *HashImageSizeOut = 0;
 
   if (VbmSize < GBL_AVB_VBMETA_HEADER_SIZE)
     return EFI_INVALID_PARAMETER;
@@ -5148,7 +4878,9 @@ GblVbmetaLookupDescriptor (
     if (Tag == GblAvbDescHashTag) {
       if (EFI_ERROR (AvbParse_HashDescriptor (Desc, DescLen,
                                               &DName, &DNameLen,
-                                              DigestOut, DigestLenOut)))
+                                              DigestOut, DigestLenOut,
+                                              SaltOut, SaltLenOut,
+                                              HashImageSizeOut)))
         continue;
       if (DNameLen != PartNameLen)
         continue;
@@ -5181,41 +4913,13 @@ GblVbmetaLookupDescriptor (
   return EFI_SUCCESS;  /* *TypeOut == GblPartDescNone → not found */
 }
 
-/* ---- per-variable formatters -------------------------------------------- */
-
 STATIC VOID
-GblGetVarVbmetaDigest (VOID)
-{
-  EFI_STATUS       Status;
-  UINT8           *Buf  = NULL;
-  UINT64           Size = 0;
-  AvbSHA256Ctx     Ctx;
-  UINT8           *Digest;
-  CHAR8            Long[GBL_VBMETA_HEX_LEN];  /* 65 bytes — fits 32-byte digest */
-
-  Status = GblVbmetaReadActiveSlot (&Buf, &Size);
-  if (EFI_ERROR (Status)) {
-    FastbootOkay ("error");
-    return;
-  }
-
-  avb_sha256_init (&Ctx);
-  avb_sha256_update (&Ctx, Buf, (UINT32)Size);
-  Digest = avb_sha256_final (&Ctx);
-  GblVbmetaHexDump (Digest, GBL_VBMETA_SHA256_LEN, Long, sizeof (Long));
-  FreePool (Buf);
-  GblFastbootRespondLong (Long);
-}
-
-STATIC VOID
-GblGetVarVbmetaSlot (OUT CHAR8 *Out, IN UINTN OutCap)
+GblVbmetaGetActiveSlot (OUT CHAR8 *Out, IN UINTN OutCap)
 {
   Slot  CurrentSlot = GetCurrentSlotSuffix ();
-  /* Suffix is e.g. L"_a"; skip the leading underscore */
   CHAR8 SlotAsc[MAX_SLOT_SUFFIX_SZ];
 
   UnicodeStrToAsciiStrS (CurrentSlot.Suffix, SlotAsc, sizeof (SlotAsc));
-  /* SlotAsc[0] == '_', SlotAsc[1] == 'a'/'b', SlotAsc[2] == '\0' */
   if (SlotAsc[0] == '_' && SlotAsc[1] != '\0')
     AsciiStrnCpyS (Out, OutCap, SlotAsc + 1, OutCap - 1);
   else
@@ -5223,673 +4927,143 @@ GblGetVarVbmetaSlot (OUT CHAR8 *Out, IN UINTN OutCap)
 }
 
 STATIC VOID
-GblGetVarVbmetaPartStatus (IN CONST CHAR8 *PartName,
-                            OUT CHAR8 *Out, IN UINTN OutCap)
-{
-  EFI_STATUS           Status;
-  UINT8               *VbmBuf  = NULL;
-  UINT64               VbmSize = 0;
-  GBL_PART_DESC_TYPE   Type;
-  CONST UINT8         *Digest    = NULL;
-  UINT32               DigestLen = 0;
-  CONST UINT8         *PubKey    = NULL;
-  UINT32               PubKeyLen = 0;
-
-  /* Read vbmeta */
-  Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
-  if (EFI_ERROR (Status)) {
-    AsciiStrnCpyS (Out, OutCap, Status == EFI_NOT_FOUND ?
-                   "n/a" : "error", OutCap - 1);
-    return;
-  }
-
-  Status = GblVbmetaLookupDescriptor (VbmBuf, VbmSize, PartName,
-                                      &Type, &Digest, &DigestLen,
-                                      &PubKey, &PubKeyLen);
-  if (EFI_ERROR (Status)) {
-    FreePool (VbmBuf);
-    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
-    return;
-  }
-
-  if (Type == GblPartDescNone) {
-    FreePool (VbmBuf);
-    AsciiStrnCpyS (Out, OutCap, "unsigned", OutCap - 1);
-    return;
-  }
-
-  if (Type == GblPartDescHash) {
-    /* Compute SHA256 of the named partition and compare with stored digest */
-    EFI_BLOCK_IO_PROTOCOL *PartBlk  = NULL;
-    EFI_HANDLE            *PartHdl  = NULL;
-    CHAR16                 PartResolved[MAX_GPT_NAME_SIZE];
-    UINT8                 *PartBuf  = NULL;
-    UINT64                 PartSize = 0;
-    UINT64                 ReadBytes;
-    AvbSHA256Ctx           Ctx;
-    UINT8                 *Computed;
-    CONST CHAR8           *Result = "ok";
-
-    Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
-                                      PartResolved, ARRAY_SIZE (PartResolved));
-    if (EFI_ERROR (Status) || PartBlk == NULL) {
-      FreePool (VbmBuf);
-      AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
-      return;
-    }
-
-    PartSize = GetPartitionSize (PartBlk);
-    if (PartSize == 0) {
-      FreePool (VbmBuf);
-      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
-      return;
-    }
-
-    ReadBytes = (PartSize + PartBlk->Media->BlockSize - 1)
-                & ~(PartBlk->Media->BlockSize - 1);
-    PartBuf = AllocatePool (ReadBytes);
-    if (PartBuf == NULL) {
-      FreePool (VbmBuf);
-      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
-      return;
-    }
-
-    Status = PartBlk->ReadBlocks (PartBlk, PartBlk->Media->MediaId,
-                                  0, ReadBytes, PartBuf);
-    if (EFI_ERROR (Status)) {
-      FreePool (PartBuf);
-      FreePool (VbmBuf);
-      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
-      return;
-    }
-
-    avb_sha256_init (&Ctx);
-    avb_sha256_update (&Ctx, PartBuf, (UINT32)PartSize);
-    Computed = avb_sha256_final (&Ctx);
-    FreePool (PartBuf);
-
-    if (DigestLen != GBL_VBMETA_SHA256_LEN ||
-        CompareMem (Computed, Digest, GBL_VBMETA_SHA256_LEN) != 0)
-      Result = "mismatch";
-
-    FreePool (VbmBuf);
-    AsciiStrnCpyS (Out, OutCap, Result, OutCap - 1);
-    return;
-  }
-
-  /* Chain partition: presence of footer indicates chained vbmeta */
-  if (Type == GblPartDescChain) {
-    EFI_BLOCK_IO_PROTOCOL *PartBlk  = NULL;
-    EFI_HANDLE            *PartHdl  = NULL;
-    CHAR16                 PartResolved[MAX_GPT_NAME_SIZE];
-    UINT8                 *PartBuf  = NULL;
-    UINT64                 PartSize = 0;
-    UINT64                 ReadBytes;
-    GBL_AVB_FOOTER         ChainFooter;
-
-    Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
-                                      PartResolved, ARRAY_SIZE (PartResolved));
-    if (EFI_ERROR (Status) || PartBlk == NULL) {
-      FreePool (VbmBuf);
-      AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
-      return;
-    }
-
-    PartSize = GetPartitionSize (PartBlk);
-    ReadBytes = (PartSize + PartBlk->Media->BlockSize - 1)
-                & ~(PartBlk->Media->BlockSize - 1);
-    PartBuf = AllocatePool (ReadBytes);
-    if (PartBuf == NULL) {
-      FreePool (VbmBuf);
-      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
-      return;
-    }
-
-    Status = PartBlk->ReadBlocks (PartBlk, PartBlk->Media->MediaId,
-                                  0, ReadBytes, PartBuf);
-    if (EFI_ERROR (Status)) {
-      FreePool (PartBuf);
-      FreePool (VbmBuf);
-      AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
-      return;
-    }
-
-    if (EFI_ERROR (AvbParse_Footer (PartBuf, PartSize, &ChainFooter))) {
-      AsciiStrnCpyS (Out, OutCap, "unsigned", OutCap - 1);
-    } else {
-      GBL_AVB_VBMETA_HEADER ChainVbHdr;
-
-      if (ChainFooter.VbmetaOffset < PartSize &&
-          ChainFooter.VbmetaSize > 0 &&
-          !EFI_ERROR (AvbParse_VbmetaHeader (
-              PartBuf + ChainFooter.VbmetaOffset,
-              ChainFooter.VbmetaSize, &ChainVbHdr))) {
-        if (ChainVbHdr.AlgorithmType == 0)
-          AsciiStrnCpyS (Out, OutCap, "not-grafted", OutCap - 1);
-        else
-          AsciiStrnCpyS (Out, OutCap, "ok", OutCap - 1);
-      } else {
-        AsciiStrnCpyS (Out, OutCap, "bad-footer", OutCap - 1);
-      }
-    }
-
-    FreePool (PartBuf);
-    FreePool (VbmBuf);
-    return;
-  }
-
-  FreePool (VbmBuf);
-  AsciiStrnCpyS (Out, OutCap, "n/a", OutCap - 1);
-}
-
-STATIC VOID
-GblGetVarVbmetaPartDescType (IN CONST CHAR8 *PartName,
-                              OUT CHAR8 *Out, IN UINTN OutCap)
+GblVbmetaSetPartStatus (
+  IN OUT GBL_VBMETA_PART_VAR *Part,
+  IN CONST UINT8             *VbmBuf,
+  IN UINT64                   VbmSize
+  )
 {
   EFI_STATUS          Status;
-  UINT8              *VbmBuf  = NULL;
-  UINT64              VbmSize = 0;
   GBL_PART_DESC_TYPE  Type;
-  CONST UINT8        *Digest = NULL;  UINT32 DigestLen = 0;
-  CONST UINT8        *PubKey = NULL;  UINT32 PubKeyLen = 0;
+  CONST UINT8        *Digest = NULL;
+  UINT32              DigestLen = 0;
+  CONST UINT8        *PubKey = NULL;
+  UINT32              PubKeyLen = 0;
 
-  Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
-  if (EFI_ERROR (Status)) {
-    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
-    return;
-  }
-
-  Status = GblVbmetaLookupDescriptor (VbmBuf, VbmSize, PartName,
+  Status = GblVbmetaLookupDescriptor (VbmBuf, VbmSize, Part->Name,
                                       &Type, &Digest, &DigestLen,
-                                      &PubKey, &PubKeyLen);
-  FreePool (VbmBuf);
-
+                                      &PubKey, &PubKeyLen,
+                                      NULL, NULL, NULL);
   if (EFI_ERROR (Status)) {
-    AsciiStrnCpyS (Out, OutCap, "error", OutCap - 1);
+    AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "error", sizeof (Part->Status) - 1);
+    AsciiStrnCpyS (Part->DescType, sizeof (Part->DescType), "error", sizeof (Part->DescType) - 1);
     return;
   }
 
   switch (Type) {
-  case GblPartDescHash:  AsciiStrnCpyS (Out, OutCap, "hash",  OutCap - 1); break;
-  case GblPartDescChain: AsciiStrnCpyS (Out, OutCap, "chain", OutCap - 1); break;
-  default:               AsciiStrnCpyS (Out, OutCap, "none",  OutCap - 1); break;
-  }
-}
-
-/**
- * GblGetVarVbmetaPartExpected - emit the expected value for a vbmeta descriptor.
- *
- * Hash-type descriptor:  emits the stored 32-byte hash digest as 64 hex chars.
- * Chain-type descriptor: emits a SHA-256 fingerprint of the chain pubkey bytes
- *                        as 64 hex chars (NOT the raw pubkey).  The raw pubkey
- *                        (~1 KB → ~2 KB hex → ~36 INFO chunks) saturated the
- *                        USB transfer pool on canoe and wedged fastboot.
- *
- * Both cases fit in 2 INFO chunks, matching the vbmeta:digest output size.
- */
-STATIC VOID
-GblGetVarVbmetaPartExpected (IN CONST CHAR8 *PartName)
-{
-  EFI_STATUS          Status;
-  UINT8              *VbmBuf  = NULL;
-  UINT64              VbmSize = 0;
-  GBL_PART_DESC_TYPE  Type;
-  CONST UINT8        *Digest = NULL;  UINT32 DigestLen = 0;
-  CONST UINT8        *PubKey = NULL;  UINT32 PubKeyLen = 0;
-
-  Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
-  if (EFI_ERROR (Status)) {
-    FastbootOkay ("error");
-    return;
-  }
-
-  Status = GblVbmetaLookupDescriptor (VbmBuf, VbmSize, PartName,
-                                      &Type, &Digest, &DigestLen,
-                                      &PubKey, &PubKeyLen);
-  if (EFI_ERROR (Status)) {
-    FreePool (VbmBuf);
-    FastbootOkay ("error");
-    return;
-  }
-
-  if (Type == GblPartDescHash && Digest != NULL && DigestLen > 0) {
-    CHAR8 Long[GBL_VBMETA_HEX_LEN];
-    GblVbmetaHexDump (Digest, DigestLen, Long, sizeof (Long));
-    FreePool (VbmBuf);
-    GblFastbootRespondLong (Long);
-  } else if (Type == GblPartDescChain && PubKey != NULL && PubKeyLen > 0) {
-    /* Fingerprint the pubkey via SHA-256 to avoid a ~2KB hex dump that
-     * saturates the USB transfer pool on canoe and wedges fastboot.
-     * Output: 64 hex chars (32-byte digest), same as vbmeta:digest. */
-    AvbSHA256Ctx     Ctx;
-    UINT8            Fingerprint[GBL_VBMETA_SHA256_LEN];
-    CHAR8            Long[GBL_VBMETA_HEX_LEN];
-    UINT8           *FpPtr;
-
-    avb_sha256_init   (&Ctx);
-    avb_sha256_update (&Ctx, PubKey, PubKeyLen);
-    FpPtr = avb_sha256_final (&Ctx);
-    CopyMem (Fingerprint, FpPtr, GBL_VBMETA_SHA256_LEN);
-    GblVbmetaHexDump (Fingerprint, GBL_VBMETA_SHA256_LEN, Long, sizeof (Long));
-    FreePool (VbmBuf);
-    GblFastbootRespondLong (Long);
-  } else {
-    FreePool (VbmBuf);
-    FastbootOkay ("n/a");
+  case GblPartDescHash:
+    AsciiStrnCpyS (Part->DescType, sizeof (Part->DescType), "hash", sizeof (Part->DescType) - 1);
+    AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "ok", sizeof (Part->Status) - 1);
+    break;
+  case GblPartDescChain:
+    AsciiStrnCpyS (Part->DescType, sizeof (Part->DescType), "chain", sizeof (Part->DescType) - 1);
+    AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "ok", sizeof (Part->Status) - 1);
+    break;
+  default:
+    AsciiStrnCpyS (Part->DescType, sizeof (Part->DescType), "none", sizeof (Part->DescType) - 1);
+    AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "unsigned", sizeof (Part->Status) - 1);
+    break;
   }
 }
 
 STATIC VOID
-GblGetVarVbmetaPartComputed (IN CONST CHAR8 *PartName)
+GblVbmetaBuildWarning (VOID)
 {
-  EFI_STATUS          Status;
-  UINT8              *VbmBuf  = NULL;
-  UINT64              VbmSize = 0;
-  GBL_PART_DESC_TYPE  Type;
-  CONST UINT8        *Digest = NULL;  UINT32 DigestLen = 0;
-  CONST UINT8        *PubKey = NULL;  UINT32 PubKeyLen = 0;
+#if defined (GBL_MODE) && (GBL_MODE == 1)
+  UINTN Idx;
+  BOOLEAN First = TRUE;
 
-  Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
-  if (EFI_ERROR (Status)) {
-    FastbootOkay ("error");
-    return;
-  }
-
-  Status = GblVbmetaLookupDescriptor (VbmBuf, VbmSize, PartName,
-                                      &Type, &Digest, &DigestLen,
-                                      &PubKey, &PubKeyLen);
-  FreePool (VbmBuf);
-
-  if (EFI_ERROR (Status)) {
-    FastbootOkay ("error");
-    return;
-  }
-
-  if (Type == GblPartDescHash) {
-    /* Compute SHA256 over the partition content */
-    EFI_BLOCK_IO_PROTOCOL *PartBlk  = NULL;
-    EFI_HANDLE            *PartHdl  = NULL;
-    CHAR16                 PartResolved[MAX_GPT_NAME_SIZE];
-    UINT8                 *PartBuf  = NULL;
-    UINT64                 PartSize = 0;
-    UINT64                 ReadBytes;
-    AvbSHA256Ctx           Ctx;
-    UINT8                 *Computed;
-    CHAR8                  Long[GBL_VBMETA_HEX_LEN];
-
-    Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
-                                      PartResolved, ARRAY_SIZE (PartResolved));
-    if (EFI_ERROR (Status) || PartBlk == NULL) {
-      FastbootOkay ("n/a");
-      return;
-    }
-
-    PartSize  = GetPartitionSize (PartBlk);
-    ReadBytes = (PartSize + PartBlk->Media->BlockSize - 1)
-                & ~(PartBlk->Media->BlockSize - 1);
-    PartBuf = AllocatePool (ReadBytes);
-    if (PartBuf == NULL) {
-      FastbootOkay ("error");
-      return;
-    }
-
-    Status = PartBlk->ReadBlocks (PartBlk, PartBlk->Media->MediaId,
-                                  0, ReadBytes, PartBuf);
-    if (EFI_ERROR (Status)) {
-      FreePool (PartBuf);
-      FastbootOkay ("error");
-      return;
-    }
-
-    avb_sha256_init (&Ctx);
-    avb_sha256_update (&Ctx, PartBuf, (UINT32)PartSize);
-    Computed = avb_sha256_final (&Ctx);
-    FreePool (PartBuf);
-
-    GblVbmetaHexDump (Computed, GBL_VBMETA_SHA256_LEN, Long, sizeof (Long));
-    GblFastbootRespondLong (Long);
-    return;
-  }
-
-  if (Type == GblPartDescChain) {
-    /* For chain: report whether the chained partition has an AVB footer */
-    EFI_BLOCK_IO_PROTOCOL *PartBlk  = NULL;
-    EFI_HANDLE            *PartHdl  = NULL;
-    CHAR16                 PartResolved[MAX_GPT_NAME_SIZE];
-    UINT8                 *PartBuf  = NULL;
-    UINT64                 PartSize = 0;
-    UINT64                 ReadBytes;
-    GBL_AVB_FOOTER         ChainFooter;
-
-    Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
-                                      PartResolved, ARRAY_SIZE (PartResolved));
-    if (EFI_ERROR (Status) || PartBlk == NULL) {
-      FastbootOkay ("n/a");
-      return;
-    }
-
-    PartSize  = GetPartitionSize (PartBlk);
-    ReadBytes = (PartSize + PartBlk->Media->BlockSize - 1)
-                & ~(PartBlk->Media->BlockSize - 1);
-    PartBuf = AllocatePool (ReadBytes);
-    if (PartBuf == NULL) {
-      FastbootOkay ("error");
-      return;
-    }
-
-    Status = PartBlk->ReadBlocks (PartBlk, PartBlk->Media->MediaId,
-                                  0, ReadBytes, PartBuf);
-    if (EFI_ERROR (Status)) {
-      FreePool (PartBuf);
-      FastbootOkay ("error");
-      return;
-    }
-
-    if (EFI_ERROR (AvbParse_Footer (PartBuf, PartSize, &ChainFooter)))
-      FastbootOkay ("unsigned");
-    else
-      FastbootOkay ("ok");
-
-    FreePool (PartBuf);
-    return;
-  }
-
-  FastbootOkay ("n/a");
-}
-
-/*
- * GblCmdGetVarVbmeta — called from CmdGetVar when Arg starts with "vbmeta:".
- * Returns TRUE if the variable was handled, FALSE otherwise.
- *
- * Long-value variables (digest, expected, computed) call GblFastbootRespondLong
- * internally and do not use the Resp buffer — the dispatcher must NOT call
- * FastbootOkay() again for those paths.
- * Short-value variables (slot, status, descriptor-type) fill Resp and the
- * dispatcher calls FastbootOkay(Resp).
- */
-STATIC BOOLEAN
-GblCmdGetVarVbmeta (IN CONST CHAR8 *Arg)
-{
-  CHAR8 Resp[MAX_RSP_SIZE];
-
-  Resp[0] = '\0';
-
-  if (AsciiStrCmp (Arg, "vbmeta:digest") == 0) {
-    GblGetVarVbmetaDigest ();   /* sends INFO+OKAY internally */
-    return TRUE;
-  }
-
-  if (AsciiStrCmp (Arg, "vbmeta:slot") == 0) {
-    GblGetVarVbmetaSlot (Resp, sizeof (Resp));
-    FastbootOkay (Resp);
-    return TRUE;
-  }
-
-  /* vbmeta:<part>:<field> */
-  {
-    /* Find first ':' after "vbmeta:" */
-    CONST CHAR8 *After  = Arg + AsciiStrLen ("vbmeta:");
-    CONST CHAR8 *Colon2 = AsciiStrStr (After, ":");
-    CONST CHAR8 *Field;
-    CHAR8        PartName[48];
-    UINT32       PNLen;
-
-    if (Colon2 == NULL)
-      return FALSE;
-
-    PNLen = (UINT32)(Colon2 - After);
-    if (PNLen == 0 || PNLen >= sizeof (PartName))
-      return FALSE;
-
-    AsciiStrnCpyS (PartName, sizeof (PartName), After, PNLen);
-
-    Field = Colon2 + 1;
-
-    if (AsciiStrCmp (Field, "status") == 0) {
-      GblGetVarVbmetaPartStatus (PartName, Resp, sizeof (Resp));
-      FastbootOkay (Resp);
-      return TRUE;
-    }
-    if (AsciiStrCmp (Field, "descriptor-type") == 0) {
-      GblGetVarVbmetaPartDescType (PartName, Resp, sizeof (Resp));
-      FastbootOkay (Resp);
-      return TRUE;
-    }
-    if (AsciiStrCmp (Field, "expected") == 0) {
-      GblGetVarVbmetaPartExpected (PartName);  /* sends INFO+OKAY internally */
-      return TRUE;
-    }
-    if (AsciiStrCmp (Field, "computed") == 0) {
-      GblGetVarVbmetaPartComputed (PartName);  /* sends INFO+OKAY internally */
-      return TRUE;
-    }
-  }
-
-  return FALSE;
-}
-
-/*
- * CmdOemVbmetaStatus — `fastboot oem vbmeta-status`
- *
- * Compact one-INFO-packet-per-row table:
- *   partition(15) descriptor(13) status   (~40 chars, fits one INFO packet)
- *
- * Full expected/computed hex is available via:
- *   getvar vbmeta:<part>:expected|computed
- *
- * After the per-partition table: vbmeta digest (sha256) and flags.
- *
- * Known partitions iterated:
- *   boot, init_boot, vendor_boot, recovery, dtbo,
- *   vbmeta_system, vbmeta_vendor
- *
- * Partitions with no descriptor in vbmeta are silently skipped.
- */
-STATIC VOID
-CmdOemVbmetaStatus (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
-{
-  /* Suppress unused-parameter warnings */
-  (VOID)Arg;
-  (VOID)Data;
-  (VOID)Size;
-
-  static CONST CHAR8 *KnownParts[] = {
-    "boot", "init_boot", "vendor_boot", "recovery",
-    "dtbo", "vbmeta_system", "vbmeta_vendor",
-  };
-  CONST UINTN NumKnown = sizeof (KnownParts) / sizeof (KnownParts[0]);
-
-  EFI_STATUS         Status;
-  UINT8             *VbmBuf  = NULL;
-  UINT64             VbmSize = 0;
-  CHAR8              Line[128];
-  UINTN              Idx;
-
-  /* ---- read vbmeta once ------------------------------------------------- */
-  Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
-  if (EFI_ERROR (Status)) {
-    FastbootFail ("vbmeta-status: cannot read vbmeta partition");
-    return;
-  }
-
-  /* ---- header ----------------------------------------------------------- */
-  FastbootInfo ("partition       descriptor    status");
-  WaitForTransferComplete ();
-  FastbootInfo ("");
-  WaitForTransferComplete ();
-
-  /* ---- per-partition rows ----------------------------------------------- */
-  for (Idx = 0; Idx < NumKnown; Idx++) {
-    CONST CHAR8          *PartName = KnownParts[Idx];
-    GBL_PART_DESC_TYPE    Type;
-    CONST UINT8          *Digest    = NULL;
-    UINT32                DigestLen = 0;
-    CONST UINT8          *PubKey    = NULL;
-    UINT32                PubKeyLen = 0;
-    CONST CHAR8          *DescType;
-    CONST CHAR8          *RowStatus;
-
-    /* Look up this partition's descriptor */
-    Status = GblVbmetaLookupDescriptor (VbmBuf, VbmSize, PartName,
-                                        &Type, &Digest, &DigestLen,
-                                        &PubKey, &PubKeyLen);
-    if (EFI_ERROR (Status))
-      continue;  /* parse error — skip */
-    if (Type == GblPartDescNone)
-      continue;  /* not in vbmeta — skip silently */
-
-    /* ---- hash descriptor ------------------------------------------------ */
-    if (Type == GblPartDescHash) {
-      EFI_BLOCK_IO_PROTOCOL *PartBlk  = NULL;
-      EFI_HANDLE            *PartHdl  = NULL;
-      CHAR16                 PartResolved[MAX_GPT_NAME_SIZE];
-      UINT8                 *PartBuf  = NULL;
-      UINT64                 PartSize = 0;
-      UINT64                 ReadBytes;
-      AvbSHA256Ctx           Ctx;
-      UINT8                 *Computed;
-
-      DescType = "hash";
-
-      Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
-                                        PartResolved, ARRAY_SIZE (PartResolved));
-      if (EFI_ERROR (Status) || PartBlk == NULL) {
-        RowStatus = "n/a";
-      } else {
-        PartSize  = GetPartitionSize (PartBlk);
-        ReadBytes = (PartSize + PartBlk->Media->BlockSize - 1)
-                    & ~(PartBlk->Media->BlockSize - 1);
-        PartBuf = AllocatePool (ReadBytes);
-        if (PartBuf == NULL) {
-          RowStatus = "error";
-        } else {
-          Status = PartBlk->ReadBlocks (PartBlk, PartBlk->Media->MediaId,
-                                        0, ReadBytes, PartBuf);
-          if (EFI_ERROR (Status)) {
-            FreePool (PartBuf);
-            RowStatus = "error";
-          } else {
-            avb_sha256_init (&Ctx);
-            avb_sha256_update (&Ctx, PartBuf, (UINT32)PartSize);
-            Computed = avb_sha256_final (&Ctx);
-            FreePool (PartBuf);
-
-            if (DigestLen != GBL_VBMETA_SHA256_LEN ||
-                CompareMem (Computed, Digest, GBL_VBMETA_SHA256_LEN) != 0)
-              RowStatus = "mismatch";
-            else
-              RowStatus = "ok";
-          }
-        }
-      }
-
-      AsciiSPrint (Line, sizeof (Line), "%-15a %-13a %a",
-                   PartName, DescType, RowStatus);
-      FastbootInfo (Line);
-      WaitForTransferComplete ();
+  AsciiStrnCpyS (mVbmetaWarning, sizeof (mVbmetaWarning), "none", sizeof (mVbmetaWarning) - 1);
+  for (Idx = 0; Idx < ARRAY_SIZE (mVbmetaPartVars); Idx++) {
+    if (AsciiStrCmp (mVbmetaPartVars[Idx].Name, "boot") != 0 &&
+        AsciiStrCmp (mVbmetaPartVars[Idx].Name, "init_boot") != 0 &&
+        AsciiStrCmp (mVbmetaPartVars[Idx].Name, "vendor_boot") != 0 &&
+        AsciiStrCmp (mVbmetaPartVars[Idx].Name, "recovery") != 0)
       continue;
-    }
-
-    /* ---- chain descriptor ----------------------------------------------- */
-    if (Type == GblPartDescChain) {
-      EFI_BLOCK_IO_PROTOCOL *PartBlk  = NULL;
-      EFI_HANDLE            *PartHdl  = NULL;
-      CHAR16                 PartResolved[MAX_GPT_NAME_SIZE];
-      UINT8                 *PartBuf  = NULL;
-      UINT64                 PartSize = 0;
-      UINT64                 ReadBytes;
-      GBL_AVB_FOOTER         ChainFooter;
-
-      DescType = "chain";
-
-      Status = LocatePartitionForGraft (PartName, &PartBlk, &PartHdl,
-                                        PartResolved, ARRAY_SIZE (PartResolved));
-      if (EFI_ERROR (Status) || PartBlk == NULL) {
-        RowStatus = "n/a";
-      } else {
-        PartSize  = GetPartitionSize (PartBlk);
-        ReadBytes = (PartSize + PartBlk->Media->BlockSize - 1)
-                    & ~(PartBlk->Media->BlockSize - 1);
-        PartBuf = AllocatePool (ReadBytes);
-        if (PartBuf == NULL) {
-          RowStatus = "error";
-        } else {
-          Status = PartBlk->ReadBlocks (PartBlk, PartBlk->Media->MediaId,
-                                        0, ReadBytes, PartBuf);
-          if (EFI_ERROR (Status)) {
-            FreePool (PartBuf);
-            RowStatus = "error";
-          } else {
-            if (EFI_ERROR (AvbParse_Footer (PartBuf, PartSize, &ChainFooter))) {
-              RowStatus = "unsigned";
-            } else {
-              GBL_AVB_VBMETA_HEADER ChainVbHdr;
-
-              if (ChainFooter.VbmetaOffset < PartSize &&
-                  ChainFooter.VbmetaSize > 0 &&
-                  !EFI_ERROR (AvbParse_VbmetaHeader (
-                      PartBuf + ChainFooter.VbmetaOffset,
-                      ChainFooter.VbmetaSize, &ChainVbHdr))) {
-                if (ChainVbHdr.AlgorithmType == 0)
-                  RowStatus = "not-grafted";
-                else
-                  RowStatus = "ok";
-              } else {
-                RowStatus = "bad-footer";
-              }
-            }
-            FreePool (PartBuf);
-          }
-        }
-      }
-
-      AsciiSPrint (Line, sizeof (Line), "%-15a %-13a %a",
-                   PartName, DescType, RowStatus);
-      FastbootInfo (Line);
-      WaitForTransferComplete ();
+    if (AsciiStrCmp (mVbmetaPartVars[Idx].Status, "unsigned") != 0)
       continue;
+
+    if (First) {
+      AsciiStrnCpyS (mVbmetaWarning, sizeof (mVbmetaWarning),
+                     "unsigned:", sizeof (mVbmetaWarning) - 1);
+      First = FALSE;
+    } else {
+      AsciiStrnCatS (mVbmetaWarning, sizeof (mVbmetaWarning), ",", AsciiStrLen (","));
     }
+    AsciiStrnCatS (mVbmetaWarning, sizeof (mVbmetaWarning),
+                   mVbmetaPartVars[Idx].Name,
+                   AsciiStrLen (mVbmetaPartVars[Idx].Name));
+  }
+#else
+  AsciiStrnCpyS (mVbmetaWarning, sizeof (mVbmetaWarning), "none", sizeof (mVbmetaWarning) - 1);
+#endif
+}
 
-    /* ---- unsupported descriptor type (e.g. hashtree) ------------------- */
-    AsciiSPrint (Line, sizeof (Line), "%-15a %-13a %a",
-                 PartName, "unknown", "unknown");
-    FastbootInfo (Line);
-    WaitForTransferComplete ();
+STATIC VOID
+GblProbeVbmetaVars (VOID)
+{
+  EFI_STATUS Status;
+  UINT8     *VbmBuf = NULL;
+  UINT64     VbmSize = 0;
+  UINTN      Idx;
+
+  GblVbmetaGetActiveSlot (mVbmetaSlot, sizeof (mVbmetaSlot));
+
+  Status = GblVbmetaReadActiveSlot (&VbmBuf, &VbmSize);
+  if (EFI_ERROR (Status)) {
+    for (Idx = 0; Idx < ARRAY_SIZE (mVbmetaPartVars); Idx++) {
+      AsciiStrnCpyS (mVbmetaPartVars[Idx].Status, sizeof (mVbmetaPartVars[Idx].Status),
+                     Status == EFI_NOT_FOUND ? "n/a" : "error",
+                     sizeof (mVbmetaPartVars[Idx].Status) - 1);
+      AsciiStrnCpyS (mVbmetaPartVars[Idx].DescType, sizeof (mVbmetaPartVars[Idx].DescType),
+                     "unknown", sizeof (mVbmetaPartVars[Idx].DescType) - 1);
+    }
+    GblVbmetaBuildWarning ();
+    return;
   }
 
-  /* ---- blank separator before summary ----------------------------------- */
-  FastbootInfo ("");
-  WaitForTransferComplete ();
+  for (Idx = 0; Idx < ARRAY_SIZE (mVbmetaPartVars); Idx++)
+    GblVbmetaSetPartStatus (&mVbmetaPartVars[Idx], VbmBuf, VbmSize);
 
-  /* ---- summary: vbmeta SHA-256 digest (64 hex chars, use chunking) ------ */
-  {
-    AvbSHA256Ctx      Ctx;
-    UINT8            *Digest;
-    CHAR8             DigestHex[GBL_VBMETA_HEX_LEN];
-
-    avb_sha256_init (&Ctx);
-    avb_sha256_update (&Ctx, VbmBuf, (UINT32)VbmSize);
-    Digest = avb_sha256_final (&Ctx);
-    GblVbmetaHexDump (Digest, GBL_VBMETA_SHA256_LEN, DigestHex, sizeof (DigestHex));
-
-    AsciiSPrint (Line, sizeof (Line), "vbmeta digest:  %a", DigestHex);
-    GblFastbootInfoLong (Line);
-  }
-
-  /* ---- summary: vbmeta flags ------------------------------------------- */
-  {
-    GBL_AVB_VBMETA_HEADER  Hdr;
-
-    if (!EFI_ERROR (AvbParse_VbmetaHeader (VbmBuf, VbmSize, &Hdr))) {
-      AsciiSPrint (Line, sizeof (Line), "vbmeta flags:   0x%08x",
-                   (UINT32)Hdr.Flags);
-      FastbootInfo (Line);
-      WaitForTransferComplete ();
+#if defined (GBL_MODE) && (GBL_MODE == 1)
+  for (Idx = 0; Idx < ARRAY_SIZE (mVbmetaPartVars); Idx++) {
+    if (AsciiStrCmp (mVbmetaPartVars[Idx].Name, "recovery") == 0) {
+      AsciiStrnCpyS (mVbmetaPartVars[Idx].Status,
+                     sizeof (mVbmetaPartVars[Idx].Status),
+                     "unsigned", sizeof (mVbmetaPartVars[Idx].Status) - 1);
+      break;
     }
   }
+#endif
 
   FreePool (VbmBuf);
-  FastbootOkay ("");
+  GblVbmetaBuildWarning ();
+}
+
+STATIC VOID
+GblPublishVbmetaVars (VOID)
+{
+  UINTN Idx;
+
+  GblProbeVbmetaVars ();
+  FastbootPublishVar ("vbmeta:capabilities", mVbmetaCapabilities);
+  FastbootPublishVar ("vbmeta:slot", mVbmetaSlot);
+  FastbootPublishVar ("vbmeta:warning", mVbmetaWarning);
+
+  for (Idx = 0; Idx < ARRAY_SIZE (mVbmetaPartVars); Idx++) {
+    FastbootPublishVar (mVbmetaPartVars[Idx].VarStatusName,
+                        mVbmetaPartVars[Idx].Status);
+    FastbootPublishVar (mVbmetaPartVars[Idx].VarDescName,
+                        mVbmetaPartVars[Idx].DescType);
+  }
+}
+
+VOID
+GblFastbootGetAvbWarning (OUT CHAR8 *Out, IN UINTN OutCap)
+{
+  if (Out == NULL || OutCap == 0)
+    return;
+  AsciiStrnCpyS (Out, OutCap, mVbmetaWarning, OutCap - 1);
 }
 
 #endif /* GBL_EXPERIMENTAL_FASTBOOT_CMDS */
@@ -5973,8 +5147,6 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
       {"oem rpmb-lock", CmdOemRpmbLock},
       {"oem rpmb-unlock", CmdOemRpmbUnlock},
       {"oem oem-unlock-toggle", CmdOemUnlockToggle},
-      /* {"oem graft-and-flash", CmdOemGraftAndFlash}, */
-      {"oem vbmeta-status", CmdOemVbmetaStatus},
 #endif
       {"oem boot-efi", CmdOemBootEfi},
       {"oem bcb-recovery", CmdOemBcbRecovery},
@@ -6126,7 +5298,7 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
     FastbootPublishVar ("snapshot-update-status", SnapshotMergeState);
   }
 
-  // Read Allow Ulock Flag
+  // Read Allow Unlock Flag
   Status = ReadAllowUnlockValue (&IsAllowUnlock);
   DEBUG ((EFI_D_VERBOSE, "IsAllowUnlock is %d\n", IsAllowUnlock));
 
@@ -6135,7 +5307,12 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
     return Status;
   }
 
-  FastbootPublishVar ("oem-unlock-allowed", IsAllowUnlock ? "yes" : "no");
+  UpdateOemUnlockAllowedVar ();
+  FastbootPublishVar ("oem-unlock-allowed", OemUnlockAllowedValue);
+
+#if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
+  GblPublishVbmetaVars ();
+#endif
 
   return EFI_SUCCESS;
 }
