@@ -418,22 +418,27 @@ FastbootMenuShowScreen (OPTION_MENU_INFO *OptionMenuInfo)
   UINT32 OptionItem = 0;
   UINT32 Height = 0;
   UINT32 i = 0;
+  UINT32 j = 0;
   CHAR8 StrTemp[MAX_RSP_SIZE] = "";
   CHAR8 StrTemp1[MAX_RSP_SIZE] = "";
   CHAR8 VersionTemp[MAX_VERSION_LEN] = "";
-  UINT32 OptionTotal = ARRAY_SIZE (mFastbootOptionTitle);
+  BOOLEAN HideAlternateSlot = FALSE;
   ZeroMem (&OptionMenuInfo->Info, sizeof (MENU_OPTION_ITEM_INFO));
 
   /* Only add alternate boot option when device is unbootable */
-  if (FixedPcdGetBool (EnableForceBootAlternateSlot) &&
-     !IsSlotsUbootable ()) {
-      OptionTotal = OptionTotal - 1;
-  }
+  HideAlternateSlot = FixedPcdGetBool (EnableForceBootAlternateSlot) &&
+      !IsSlotsUbootable ();
 
   /* Update fastboot option title */
   OptionMenuInfo->Info.MsgInfo = mFastbootOptionTitle;
-  for (i = 0; i < OptionTotal; i++) {
-    OptionMenuInfo->Info.OptionItems[i] = i;
+  for (i = 0; i < ARRAY_SIZE (mFastbootOptionTitle); i++) {
+    if (OptionMenuInfo->Info.MsgInfo[i].Attribute != OPTION_ITEM)
+      continue;
+    if (HideAlternateSlot &&
+        OptionMenuInfo->Info.MsgInfo[i].Action == ALTERNATESLOT)
+      continue;
+    OptionMenuInfo->Info.OptionItems[j] = i;
+    j++;
   }
   OptionItem =
       OptionMenuInfo->Info.OptionItems[OptionMenuInfo->Info.OptionIndex];
@@ -529,7 +534,7 @@ FastbootMenuShowScreen (OPTION_MENU_INFO *OptionMenuInfo)
   }
   IsFastbootCommonMsgInit = TRUE;
   OptionMenuInfo->Info.MenuType = DISPLAY_MENU_FASTBOOT;
-  OptionMenuInfo->Info.OptionNum = OptionTotal;
+  OptionMenuInfo->Info.OptionNum = j;
 
   return Status;
 }
