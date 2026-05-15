@@ -4410,61 +4410,6 @@ CmdOemEscape (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
           Status));
 }
 
-#define GBL_RPMB_UNLOCK_CONFIRM " CONFIRM_WIPE"
-
-/* Dangerous debug-only direct DevInfo state toggle. This intentionally bypasses
- * the normal fastboot display/FRP confirmation path so we can run locked-state
- * boot experiments and then recover from our own FastbootLib. It still uses the
- * platform SetDeviceUnlockValue() primitive, so it also calls ResetDeviceState()
- * and writes the recovery wipe-data command into misc. Never expose outside
- * debug/testbench builds. */
-STATIC VOID
-CmdOemRpmbSetUnlockState (
-  IN CONST CHAR8 *Arg,
-  IN BOOLEAN State
-  )
-{
-  EFI_STATUS Status;
-  CHAR8 Resp[MAX_RSP_SIZE];
-
-  if (AsciiStrCmp (Arg, GBL_RPMB_UNLOCK_CONFIRM) != 0) {
-    FastbootInfo ("DANGEROUS: ABL NOT PATCHED FOR THIS - ONLY USE IN UNLOCK");
-    FastbootInfo ("SetDeviceUnlockValue requests data wipe via misc");
-    AsciiSPrint (Resp, sizeof (Resp), "rerun with:%a",
-                 GBL_RPMB_UNLOCK_CONFIRM);
-    FastbootFail (Resp);
-    return;
-  }
-
-  FastbootInfo ("DANGEROUS: direct RPMB DevInfo unlock-state write");
-  FastbootInfo ("ABL NOT PATCHED FOR THIS - ONLY USE IN UNLOCK");
-  FastbootInfo ("SetDeviceUnlockValue also requests data wipe via misc");
-
-  Status = SetDeviceUnlockValue (UNLOCK, State);
-  if (EFI_ERROR (Status)) {
-    AsciiSPrint (Resp, sizeof (Resp), "rpmb-%a failed: %r",
-                 State ? "unlock" : "lock", Status);
-    FastbootFail (Resp);
-    return;
-  }
-
-  AsciiSPrint (Resp, sizeof (Resp), "rpmb-%a requested; reboot required",
-               State ? "unlock" : "lock");
-  FastbootOkay (Resp);
-}
-
-STATIC VOID
-CmdOemRpmbLock (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
-{
-  CmdOemRpmbSetUnlockState (Arg, FALSE);
-}
-
-STATIC VOID
-CmdOemRpmbUnlock (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
-{
-  CmdOemRpmbSetUnlockState (Arg, TRUE);
-}
-
 /*
  * WriteAllowUnlockValue — write the OEM-unlock-allowed bit to the FRP
  * partition. This is the equivalent of Android's Developer Settings →
@@ -5145,8 +5090,6 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
       {"oem audio-framework", CmdOemAudioFrameWork},
 #if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
       {"oem escape", CmdOemEscape},
-      {"oem rpmb-lock", CmdOemRpmbLock},
-      {"oem rpmb-unlock", CmdOemRpmbUnlock},
       {"oem oem-unlock-toggle", CmdOemUnlockToggle},
 #endif
       {"oem boot-efi", CmdOemBootEfi},
