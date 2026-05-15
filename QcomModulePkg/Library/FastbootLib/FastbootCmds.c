@@ -111,13 +111,6 @@ EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
    Harmless to EFIs that don't look for this GUID. */
 STATIC EFI_GUID  gGblStagedBufferGuid = GBL_STAGED_BUFFER_GUID;
 
-typedef struct {
-  UINT32                Magic;
-  UINT32                Version;
-  EFI_PHYSICAL_ADDRESS  Base;
-  UINTN                 Size;
-} GBL_STAGED_BUFFER_TABLE;
-
 STATIC GBL_STAGED_BUFFER_TABLE  gGblStagedBufferRecord;
 
 #if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
