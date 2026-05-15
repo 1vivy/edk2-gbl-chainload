@@ -98,8 +98,6 @@ extern VOID GblFastbootGetAvbWarning (OUT CHAR8 *Out, IN UINTN OutCap);
 # define GBL_CHAINLOAD_MODE  "mode-1"
 #elif (GBL_MODE == 2)
 # define GBL_CHAINLOAD_MODE  "mode-2"
-#elif (GBL_MODE == 3)
-# define GBL_CHAINLOAD_MODE  "mode-3"
 #else
 # define GBL_CHAINLOAD_MODE  "unknown-mode"
 #endif
