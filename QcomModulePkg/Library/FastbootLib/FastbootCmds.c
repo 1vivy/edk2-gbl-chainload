@@ -102,6 +102,24 @@ EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
 #include "SparseFormat.h"
 #include "Recovery.h"
 
+/* Shared contract between the oem boot-efi producer (here) and the consumer
+   (GblChainloadPkg/Library/GblPayloadLib/LocateOverlay.c). */
+#include "../../../../tools/shared/gbl_staged_buffer.h"
+
+/* Configuration table record — installed into the UEFI configuration table
+   by CmdOemBootEfi so an overlay-aware staged EFI can find its staged buffer.
+   Harmless to EFIs that don't look for this GUID. */
+STATIC EFI_GUID  gGblStagedBufferGuid = GBL_STAGED_BUFFER_GUID;
+
+typedef struct {
+  UINT32                Magic;
+  UINT32                Version;
+  EFI_PHYSICAL_ADDRESS  Base;
+  UINTN                 Size;
+} GBL_STAGED_BUFFER_TABLE;
+
+STATIC GBL_STAGED_BUFFER_TABLE  gGblStagedBufferRecord;
+
 #if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
 typedef AvbVBMetaImageHeader GBL_AVB_VBMETA_HEADER;
 typedef AvbDescriptorTag     GBL_AVB_DESCRIPTOR_TAG;
@@ -4357,6 +4375,16 @@ CmdOemBootEfi (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
                "loading staged %llu bytes", mFlashNumDataBytes);
   FastbootInfo (Resp);
   WaitForTransferComplete ();
+
+  /* Install a configuration table so an overlay-aware EFI (gbl-chainload's
+     GblPayloadLib/LocateOverlay.c) can find the staged buffer it was loaded
+     from.  This is how the test path (stage + oem boot-efi) provides the
+     same buffer-location information as the production path. */
+  gGblStagedBufferRecord.Magic   = GBL_STAGED_BUFFER_MAGIC;
+  gGblStagedBufferRecord.Version = GBL_STAGED_BUFFER_VERSION;
+  gGblStagedBufferRecord.Base    = (EFI_PHYSICAL_ADDRESS)(UINTN)mFlashDataBuffer;
+  gGblStagedBufferRecord.Size    = (UINTN)mFlashNumDataBytes;
+  gBS->InstallConfigurationTable (&gGblStagedBufferGuid, &gGblStagedBufferRecord);
 
   Status = gBS->LoadImage (FALSE, gImageHandle, NULL,
                            mFlashDataBuffer, mFlashNumDataBytes,
