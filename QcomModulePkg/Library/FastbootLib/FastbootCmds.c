@@ -3317,6 +3317,7 @@ SetDeviceUnlock (UINT32 Type, BOOLEAN State)
   }
 
   FastbootInfo ("WARNING: data wipe skipped");
+  WaitForTransferComplete ();
   FastbootInfo ("Wipe from custom recovery if FBE re-encryption needed");
   WaitForTransferComplete ();
   FastbootOkay ("");
