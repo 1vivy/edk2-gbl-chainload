@@ -81,6 +81,13 @@
 
 STATIC OPTION_MENU_INFO gMenuInfo;
 
+extern EFI_STATUS GblFastbootReadOemUnlockAllowed (OUT UINT32 *Allowed);
+extern VOID GblFastbootGetAvbWarning (OUT CHAR8 *Out, IN UINTN OutCap);
+
+#if defined (AUTO_DEBUG_MODE) || defined (MODE_DEBUG) || defined (MODE_TEMPLATE) || defined (FAKELOCKED) || defined (FAKELOCKED_DEBUG)
+#define GBL_EXPERIMENTAL_FASTBOOT_CMDS 1
+#endif
+
 #ifndef GBL_MODE
 # define GBL_MODE 0
 #endif
@@ -152,12 +159,28 @@ STATIC MENU_MSG_INFO mFastbootOptionTitle[] = {
      0,
      POWEROFF},
     {{"Boot to Alternate Slot"},
-      BIG_FACTOR,
-      BGR_RED,
-      BGR_BLACK,
-      OPTION_ITEM,
-      0,
-      ALTERNATESLOT},
+       BIG_FACTOR,
+       BGR_RED,
+       BGR_BLACK,
+       OPTION_ITEM,
+       0,
+       ALTERNATESLOT},
+#if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
+    {{"Enable OEM unlock"},
+       BIG_FACTOR,
+       BGR_YELLOW,
+       BGR_BLACK,
+       OPTION_ITEM,
+       0,
+       OEMUNLOCKENABLE},
+    {{"Escape"},
+       BIG_FACTOR,
+       BGR_YELLOW,
+       BGR_BLACK,
+       OPTION_ITEM,
+       0,
+       ESCAPE},
+#endif
 };
 
 STATIC MENU_MSG_INFO mFastbootCommonWarnMsgInfo[] = {
@@ -247,13 +270,6 @@ STATIC MENU_MSG_INFO mFastbootCommonMsgInfo[] = {
      COMMON,
      0,
      NOACTION},
-    {{"PRIMARY BOOT OS - "},
-     COMMON_FACTOR,
-     BGR_CYAN,
-     BGR_BLACK,
-     COMMON,
-     0,
-     NOACTION},
     {{"gbl-chainload"},
      COMMON_FACTOR,
      BGR_GREEN,
@@ -268,7 +284,7 @@ STATIC MENU_MSG_INFO mFastbootCommonMsgInfo[] = {
      COMMON,
      0,
      NOACTION},
-    {{"BUILD - " __DATE__ " " __TIME__},
+    {{"DATE - " __DATE__ " " __TIME__},
      COMMON_FACTOR,
      BGR_GREEN,
      BGR_BLACK,
@@ -278,6 +294,23 @@ STATIC MENU_MSG_INFO mFastbootCommonMsgInfo[] = {
     {{GBL_CHAINLOAD_STATE},
      COMMON_FACTOR,
      BGR_GREEN,
+     BGR_BLACK,
+     COMMON,
+     0,
+     NOACTION},
+    {{"OEM UNLOCK ALLOWED - "},
+     COMMON_FACTOR,
+     BGR_YELLOW,
+     BGR_BLACK,
+     COMMON,
+     0,
+     NOACTION},
+};
+
+STATIC MENU_MSG_INFO mFastbootAvbWarnMsgInfo[] = {
+    {{"AVB WARNING - "},
+     COMMON_FACTOR,
+     BGR_YELLOW,
      BGR_BLACK,
      COMMON,
      0,
@@ -332,6 +365,7 @@ UpdateFastbootOptionItem (UINT32 OptionItem, UINT32 *pLocation)
   UINT32 AlternateMsgLen = AsciiStrLen (mFastbootAlternateWarnMsgInfo[0].Msg);
   UINT32 CommonMsgLen = AsciiStrLen (mFastbootCommonWarnMsgInfo[0].Msg);
   UINT32 MaxLineLen = 0;
+  CHAR8 AvbWarning[MAX_MSG_SIZE] = "";
 
   FastbootLineInfo = AllocateZeroPool (sizeof (MENU_MSG_INFO));
   if (FastbootLineInfo == NULL) {
@@ -389,8 +423,28 @@ UpdateFastbootOptionItem (UINT32 OptionItem, UINT32 *pLocation)
   if (Status != EFI_SUCCESS) {
     goto Exit;
   }
-  /* Add two black lines for next message */
-  Location += Height + LineHeight * 2;
+  Location += Height;
+
+#if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
+  GblFastbootGetAvbWarning (AvbWarning, sizeof (AvbWarning));
+  if (AsciiStrCmp (AvbWarning, "none") != 0 && AvbWarning[0] != '\0') {
+    Location += LineHeight;
+    AsciiStrnCpyS (mFastbootAvbWarnMsgInfo[0].Msg,
+                   sizeof (mFastbootAvbWarnMsgInfo[0].Msg),
+                   "AVB WARNING - ", AsciiStrLen ("AVB WARNING - "));
+    AsciiStrnCatS (mFastbootAvbWarnMsgInfo[0].Msg,
+                   sizeof (mFastbootAvbWarnMsgInfo[0].Msg),
+                   AvbWarning, AsciiStrLen (AvbWarning));
+    mFastbootAvbWarnMsgInfo[0].Location = Location;
+    Status = DrawMenu (&mFastbootAvbWarnMsgInfo[0], &Height);
+    if (Status != EFI_SUCCESS)
+      goto Exit;
+    Location += Height;
+    Location += LineHeight;
+  } else {
+    Location += LineHeight * 2;
+  }
+#endif
 
 Exit:
   FreePool (FastbootLineInfo);
@@ -416,22 +470,27 @@ FastbootMenuShowScreen (OPTION_MENU_INFO *OptionMenuInfo)
   UINT32 OptionItem = 0;
   UINT32 Height = 0;
   UINT32 i = 0;
+  UINT32 j = 0;
   CHAR8 StrTemp[MAX_RSP_SIZE] = "";
   CHAR8 StrTemp1[MAX_RSP_SIZE] = "";
   CHAR8 VersionTemp[MAX_VERSION_LEN] = "";
-  UINT32 OptionTotal = ARRAY_SIZE (mFastbootOptionTitle);
+  BOOLEAN HideAlternateSlot = FALSE;
   ZeroMem (&OptionMenuInfo->Info, sizeof (MENU_OPTION_ITEM_INFO));
 
   /* Only add alternate boot option when device is unbootable */
-  if (FixedPcdGetBool (EnableForceBootAlternateSlot) &&
-     !IsSlotsUbootable ()) {
-      OptionTotal = OptionTotal - 1;
-  }
+  HideAlternateSlot = FixedPcdGetBool (EnableForceBootAlternateSlot) &&
+      !IsSlotsUbootable ();
 
   /* Update fastboot option title */
   OptionMenuInfo->Info.MsgInfo = mFastbootOptionTitle;
-  for (i = 0; i < OptionTotal; i++) {
-    OptionMenuInfo->Info.OptionItems[i] = i;
+  for (i = 0; i < ARRAY_SIZE (mFastbootOptionTitle); i++) {
+    if (OptionMenuInfo->Info.MsgInfo[i].Attribute != OPTION_ITEM)
+      continue;
+    if (HideAlternateSlot &&
+        OptionMenuInfo->Info.MsgInfo[i].Action == ALTERNATESLOT)
+      continue;
+    OptionMenuInfo->Info.OptionItems[j] = i;
+    j++;
   }
   OptionItem =
       OptionMenuInfo->Info.OptionItems[OptionMenuInfo->Info.OptionIndex];
@@ -517,28 +576,27 @@ FastbootMenuShowScreen (OPTION_MENU_INFO *OptionMenuInfo)
                       AsciiStrLen ("not found"));
         }
         break;
-      case 9:
-        /* Get boot path status */
-        switch (ReadBootPath ()) {
-          case BOOT_PATH_ANDROID:
-            AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
-                          sizeof (mFastbootCommonMsgInfo[i].Msg), "Android",
-                          AsciiStrLen ("Android"));
-            break;
-          case BOOT_PATH_ESP:
-            AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
-                          sizeof (mFastbootCommonMsgInfo[i].Msg), "Linux",
-                          AsciiStrLen ("Linux"));
-            break;
-          default:
-            AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
-                          sizeof (mFastbootCommonMsgInfo[i].Msg), "Unknown",
-                          AsciiStrLen ("Unknown"));
-            break;
-        }
-        break;
       }
     }
+
+    if (i == ARRAY_SIZE (mFastbootCommonMsgInfo) - 1) {
+      UINT32 Allowed = 0;
+      AsciiStrnCpyS (mFastbootCommonMsgInfo[i].Msg,
+                     sizeof (mFastbootCommonMsgInfo[i].Msg),
+                     "OEM UNLOCK ALLOWED - ",
+                     AsciiStrLen ("OEM UNLOCK ALLOWED - "));
+      if (EFI_ERROR (GblFastbootReadOemUnlockAllowed (&Allowed))) {
+        AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+                       sizeof (mFastbootCommonMsgInfo[i].Msg),
+                       "unknown", AsciiStrLen ("unknown"));
+      } else {
+        AsciiStrnCatS (mFastbootCommonMsgInfo[i].Msg,
+                       sizeof (mFastbootCommonMsgInfo[i].Msg),
+                       Allowed ? "yes" : "no",
+                       Allowed ? AsciiStrLen ("yes") : AsciiStrLen ("no"));
+      }
+    }
+
     mFastbootCommonMsgInfo[i].Location = Location;
     Status = DrawMenu (&mFastbootCommonMsgInfo[i], &Height);
     if (Status != EFI_SUCCESS)
@@ -547,7 +605,7 @@ FastbootMenuShowScreen (OPTION_MENU_INFO *OptionMenuInfo)
   }
   IsFastbootCommonMsgInit = TRUE;
   OptionMenuInfo->Info.MenuType = DISPLAY_MENU_FASTBOOT;
-  OptionMenuInfo->Info.OptionNum = OptionTotal;
+  OptionMenuInfo->Info.OptionNum = j;
 
   return Status;
 }

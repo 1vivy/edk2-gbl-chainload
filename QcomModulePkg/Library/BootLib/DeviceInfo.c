@@ -249,9 +249,6 @@ EFI_STATUS
 SetDeviceUnlockValue (UINT32 Type, BOOLEAN State)
 {
   EFI_STATUS Status = EFI_SUCCESS;
-  struct RecoveryMessage Msg;
-  EFI_GUID Ptype = gEfiMiscPartitionGuid;
-  MemCardType CardType = UNKNOWN;
 
   switch (Type) {
   case UNLOCK:
@@ -278,20 +275,7 @@ SetDeviceUnlockValue (UINT32 Type, BOOLEAN State)
     return Status;
   }
 
-  gBS->SetMem ((VOID *)&Msg, sizeof (Msg), 0);
-  Status = AsciiStrnCpyS (Msg.Recovery, sizeof (Msg.Recovery),
-                          RECOVERY_WIPE_DATA, AsciiStrLen (RECOVERY_WIPE_DATA));
-  if (Status == EFI_SUCCESS) {
-    CardType = CheckRootDeviceType ();
-    if (CardType == NAND) {
-      Status = GetNandMiscPartiGuid (&Ptype);
-      if (Status != EFI_SUCCESS) {
-        return Status;
-      }
-    }
-
-    Status = WriteToPartition (&Ptype, &Msg, sizeof (Msg));
-  }
+  DEBUG ((EFI_D_WARN, "SetDeviceUnlockValue: wipe skipped (custom recovery assumed)\n"));
 
   return Status;
 }
