@@ -83,7 +83,9 @@ STATIC OPTION_MENU_INFO gMenuInfo;
 
 extern EFI_STATUS GblFastbootReadOemUnlockAllowed (OUT UINT32 *Allowed);
 extern VOID GblFastbootGetAvbWarning (OUT CHAR8 *Out, IN UINTN OutCap);
+#if (GBL_MODE == 2)
 extern VOID GblFastbootGetMode2Warning (OUT CHAR8 *Out, IN UINTN OutCap);
+#endif
 
 #if defined (AUTO_DEBUG_MODE) || defined (MODE_DEBUG) || defined (MODE_TEMPLATE) || defined (FAKELOCKED) || defined (FAKELOCKED_DEBUG)
 #define GBL_EXPERIMENTAL_FASTBOOT_CMDS 1
@@ -316,6 +318,7 @@ STATIC MENU_MSG_INFO mFastbootAvbWarnMsgInfo[] = {
      NOACTION},
 };
 
+#if (GBL_MODE == 2)
 STATIC MENU_MSG_INFO mFastbootMode2WarnMsgInfo[] = {
     {{"MODE-2 - "},
      COMMON_FACTOR,
@@ -325,6 +328,7 @@ STATIC MENU_MSG_INFO mFastbootMode2WarnMsgInfo[] = {
      0,
      NOACTION},
 };
+#endif
 
 STATIC EFI_STATUS CleanMessage (UINT32 MessageLen, UINT32 Location)
 {
@@ -375,7 +379,9 @@ UpdateFastbootOptionItem (UINT32 OptionItem, UINT32 *pLocation)
   UINT32 CommonMsgLen = AsciiStrLen (mFastbootCommonWarnMsgInfo[0].Msg);
   UINT32 MaxLineLen = 0;
   CHAR8 AvbWarning[MAX_MSG_SIZE] = "";
+#if (GBL_MODE == 2)
   CHAR8 Mode2Warning[MAX_MSG_SIZE] = "";
+#endif
 
   FastbootLineInfo = AllocateZeroPool (sizeof (MENU_MSG_INFO));
   if (FastbootLineInfo == NULL) {
