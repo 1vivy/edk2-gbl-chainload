@@ -5072,6 +5072,28 @@ GblFastbootGetAvbWarning (OUT CHAR8 *Out, IN UINTN OutCap)
 
 #endif /* GBL_EXPERIMENTAL_FASTBOOT_CMDS */
 
+STATIC CHAR8 mMode2Warning[MAX_RSP_SIZE] = "";
+
+VOID
+GblFastbootSetMode2Warning (IN CONST CHAR8 *Warning)
+{
+  if (Warning == NULL) {
+    mMode2Warning[0] = '\0';
+    return;
+  }
+  AsciiStrnCpyS (mMode2Warning, sizeof (mMode2Warning),
+                 Warning, sizeof (mMode2Warning) - 1);
+}
+
+VOID
+GblFastbootGetMode2Warning (OUT CHAR8 *Out, IN UINTN OutCap)
+{
+  if (Out == NULL || OutCap == 0) {
+    return;
+  }
+  AsciiStrnCpyS (Out, OutCap, mMode2Warning, OutCap - 1);
+}
+
 /* Registers all Stock commands, Publishes all stock variables
  * and partitiion sizes. base and size are the respective parameters
  * to the Fastboot Buffer used to store the downloaded image for flashing

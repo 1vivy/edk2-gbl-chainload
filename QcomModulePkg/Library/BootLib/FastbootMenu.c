@@ -83,6 +83,7 @@ STATIC OPTION_MENU_INFO gMenuInfo;
 
 extern EFI_STATUS GblFastbootReadOemUnlockAllowed (OUT UINT32 *Allowed);
 extern VOID GblFastbootGetAvbWarning (OUT CHAR8 *Out, IN UINTN OutCap);
+extern VOID GblFastbootGetMode2Warning (OUT CHAR8 *Out, IN UINTN OutCap);
 
 #if defined (AUTO_DEBUG_MODE) || defined (MODE_DEBUG) || defined (MODE_TEMPLATE) || defined (FAKELOCKED) || defined (FAKELOCKED_DEBUG)
 #define GBL_EXPERIMENTAL_FASTBOOT_CMDS 1
@@ -315,6 +316,16 @@ STATIC MENU_MSG_INFO mFastbootAvbWarnMsgInfo[] = {
      NOACTION},
 };
 
+STATIC MENU_MSG_INFO mFastbootMode2WarnMsgInfo[] = {
+    {{"MODE-2 - "},
+     COMMON_FACTOR,
+     BGR_YELLOW,
+     BGR_BLACK,
+     COMMON,
+     0,
+     NOACTION},
+};
+
 STATIC EFI_STATUS CleanMessage (UINT32 MessageLen, UINT32 Location)
 {
   EFI_STATUS Status = EFI_SUCCESS;
@@ -364,6 +375,7 @@ UpdateFastbootOptionItem (UINT32 OptionItem, UINT32 *pLocation)
   UINT32 CommonMsgLen = AsciiStrLen (mFastbootCommonWarnMsgInfo[0].Msg);
   UINT32 MaxLineLen = 0;
   CHAR8 AvbWarning[MAX_MSG_SIZE] = "";
+  CHAR8 Mode2Warning[MAX_MSG_SIZE] = "";
 
   FastbootLineInfo = AllocateZeroPool (sizeof (MENU_MSG_INFO));
   if (FastbootLineInfo == NULL) {
@@ -435,6 +447,27 @@ UpdateFastbootOptionItem (UINT32 OptionItem, UINT32 *pLocation)
                    AvbWarning, AsciiStrLen (AvbWarning));
     mFastbootAvbWarnMsgInfo[0].Location = Location;
     Status = DrawMenu (&mFastbootAvbWarnMsgInfo[0], &Height);
+    if (Status != EFI_SUCCESS)
+      goto Exit;
+    Location += Height;
+    Location += LineHeight;
+  } else {
+    Location += LineHeight * 2;
+  }
+#endif
+
+#if (GBL_MODE == 2)
+  GblFastbootGetMode2Warning (Mode2Warning, sizeof (Mode2Warning));
+  if (Mode2Warning[0] != '\0') {
+    Location += LineHeight;
+    AsciiStrnCpyS (mFastbootMode2WarnMsgInfo[0].Msg,
+                   sizeof (mFastbootMode2WarnMsgInfo[0].Msg),
+                   "MODE-2 - ", AsciiStrLen ("MODE-2 - "));
+    AsciiStrnCatS (mFastbootMode2WarnMsgInfo[0].Msg,
+                   sizeof (mFastbootMode2WarnMsgInfo[0].Msg),
+                   Mode2Warning, AsciiStrLen (Mode2Warning));
+    mFastbootMode2WarnMsgInfo[0].Location = Location;
+    Status = DrawMenu (&mFastbootMode2WarnMsgInfo[0], &Height);
     if (Status != EFI_SUCCESS)
       goto Exit;
     Location += Height;
