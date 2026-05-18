@@ -319,7 +319,7 @@ STATIC MENU_MSG_INFO mFastbootAvbWarnMsgInfo[] = {
 STATIC MENU_MSG_INFO mFastbootMode2WarnMsgInfo[] = {
     {{"MODE-2 - "},
      COMMON_FACTOR,
-     BGR_YELLOW,
+     BGR_RED,
      BGR_BLACK,
      COMMON,
      0,
