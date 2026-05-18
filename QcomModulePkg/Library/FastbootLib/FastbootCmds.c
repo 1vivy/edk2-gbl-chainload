@@ -102,6 +102,17 @@ EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
 #include "SparseFormat.h"
 #include "Recovery.h"
 
+/* Shared contract between the oem boot-efi producer (here) and the consumer
+   (GblChainloadPkg/Library/GblPayloadLib/LocateOverlay.c). */
+#include "../../../../tools/shared/gbl_staged_buffer.h"
+
+/* Configuration table record — installed into the UEFI configuration table
+   by CmdOemBootEfi so an overlay-aware staged EFI can find its staged buffer.
+   Harmless to EFIs that don't look for this GUID. */
+STATIC EFI_GUID  gGblStagedBufferGuid = GBL_STAGED_BUFFER_GUID;
+
+STATIC GBL_STAGED_BUFFER_TABLE  gGblStagedBufferRecord;
+
 #if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
 typedef AvbVBMetaImageHeader GBL_AVB_VBMETA_HEADER;
 typedef AvbDescriptorTag     GBL_AVB_DESCRIPTOR_TAG;
@@ -4334,9 +4345,24 @@ GblFastbootReadOemUnlockAllowed (OUT UINT32 *Allowed)
  * StartImage does not return on a successful boot — control transfers to
  * the staged image. If we get back here it's because the image returned
  * (rare for boot loaders) or LoadImage/StartImage failed.
+ *
+ * DoBootEfi() is the shared body; InstallStagedTable controls whether the
+ * GBL_STAGED_BUFFER_TABLE config table is published before LoadImage.
+ *
+ *   TRUE  → `oem boot-efi`         (normal test path: staged-buffer source)
+ *   FALSE → `oem boot-efi-blockio` (BlockIO test path: child falls through
+ *            to ReadEfispRawBytes because no config table is present)
+ *
+ * Dispatch note: FastbootLib uses prefix matching (AsciiStrnCmp against
+ * cmd->prefix_len bytes), so "oem boot-efi" would match "oem boot-efi-blockio"
+ * as a prefix.  We avoid the collision by registering "oem boot-efi-blockio"
+ * AFTER "oem boot-efi" in cmd_list[]; the registration loop prepends entries
+ * to cmdlist, so later entries appear earlier in traversal and are checked
+ * first.
  */
 STATIC VOID
-CmdOemBootEfi (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+DoBootEfi (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size,
+           IN BOOLEAN InstallStagedTable)
 {
   EFI_STATUS Status;
   EFI_HANDLE ImageHandle = NULL;
@@ -4357,6 +4383,21 @@ CmdOemBootEfi (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
                "loading staged %llu bytes", mFlashNumDataBytes);
   FastbootInfo (Resp);
   WaitForTransferComplete ();
+
+  if (InstallStagedTable) {
+    /* Install a configuration table so an overlay-aware EFI (gbl-chainload's
+       GblPayloadLib/LocateOverlay.c) can find the staged buffer it was loaded
+       from.  This is how the test path (stage + oem boot-efi) provides the
+       same buffer-location information as the production path. */
+    gGblStagedBufferRecord.Magic   = GBL_STAGED_BUFFER_MAGIC;
+    gGblStagedBufferRecord.Version = GBL_STAGED_BUFFER_VERSION;
+    gGblStagedBufferRecord.Base    = (EFI_PHYSICAL_ADDRESS)(UINTN)mFlashDataBuffer;
+    gGblStagedBufferRecord.Size    = (UINTN)mFlashNumDataBytes;
+    gBS->InstallConfigurationTable (&gGblStagedBufferGuid, &gGblStagedBufferRecord);
+  }
+  /* else: no config table installed; the staged child will find no
+   * GBL_STAGED_BUFFER_TABLE and fall through to ReadEfispRawBytes (BlockIO),
+   * exercising the production EFISP-read path from a staged-load test. */
 
   Status = gBS->LoadImage (FALSE, gImageHandle, NULL,
                            mFlashDataBuffer, mFlashNumDataBytes,
@@ -4381,6 +4422,23 @@ CmdOemBootEfi (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   DEBUG ((EFI_D_ERROR,
           "oem boot-efi: StartImage returned %r (image exited back to UEFI)\n",
           Status));
+}
+
+STATIC VOID
+CmdOemBootEfi (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  DoBootEfi (Arg, Data, Size, TRUE);
+}
+
+/* `oem boot-efi-blockio`: identical to `oem boot-efi` but skips installing
+ * the GBL_STAGED_BUFFER_TABLE config table.  The staged gbl-chainload child
+ * therefore finds no config table and falls through to ReadEfispRawBytes,
+ * exercising the production BlockIO/EFISP-read path from a `fastboot stage`
+ * test without flashing anything. */
+STATIC VOID
+CmdOemBootEfiBlockIo (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  DoBootEfi (Arg, Data, Size, FALSE);
 }
 
 #if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
@@ -5093,6 +5151,7 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
       {"oem oem-unlock-toggle", CmdOemUnlockToggle},
 #endif
       {"oem boot-efi", CmdOemBootEfi},
+      {"oem boot-efi-blockio", CmdOemBootEfiBlockIo},
       {"oem bcb-recovery", CmdOemBcbRecovery},
       {"oem bcb-fastboot", CmdOemBcbFastboot},
       {"oem bcb-clear", CmdOemBcbClear},
@@ -5129,8 +5188,6 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
   FastbootPublishVar ("gbl-chainload_mode", "mode-1");
 #elif (GBL_MODE == 2)
   FastbootPublishVar ("gbl-chainload_mode", "mode-2");
-#elif (GBL_MODE == 3)
-  FastbootPublishVar ("gbl-chainload_mode", "mode-3");
 #else
   FastbootPublishVar ("gbl-chainload_mode", "unknown");
 #endif
