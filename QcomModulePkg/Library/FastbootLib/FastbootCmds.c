@@ -5072,6 +5072,8 @@ GblFastbootGetAvbWarning (OUT CHAR8 *Out, IN UINTN OutCap)
 
 #endif /* GBL_EXPERIMENTAL_FASTBOOT_CMDS */
 
+#if (GBL_MODE == 2)
+
 STATIC CHAR8 mMode2Warning[MAX_RSP_SIZE] = "";
 
 VOID
@@ -5093,6 +5095,8 @@ GblFastbootGetMode2Warning (OUT CHAR8 *Out, IN UINTN OutCap)
   }
   AsciiStrnCpyS (Out, OutCap, mMode2Warning, OutCap - 1);
 }
+
+#endif /* GBL_MODE == 2 */
 
 /* Registers all Stock commands, Publishes all stock variables
  * and partitiion sizes. base and size are the respective parameters
