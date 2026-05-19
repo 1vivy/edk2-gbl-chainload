@@ -128,11 +128,13 @@ typedef AvbDescriptorTag     GBL_AVB_DESCRIPTOR_TAG;
 #define Flags                         flags
 
 #define GblAvbDescHashTag             AVB_DESCRIPTOR_TAG_HASH
+#define GblAvbDescHashtreeTag         AVB_DESCRIPTOR_TAG_HASHTREE
 #define GblAvbDescChainPartitionTag   AVB_DESCRIPTOR_TAG_CHAIN_PARTITION
 
 STATIC EFI_STATUS AvbParse_VbmetaHeader (IN CONST UINT8 *Vbmeta, IN UINT64 VbmetaSize, OUT GBL_AVB_VBMETA_HEADER *HeaderOut);
 STATIC EFI_STATUS AvbParse_NextDescriptor (IN CONST UINT8 *AuxBlock, IN UINT64 AuxSize, IN OUT UINT64 *Cursor, OUT GBL_AVB_DESCRIPTOR_TAG *TagOut, OUT CONST UINT8 **DescriptorOut, OUT UINT64 *DescriptorLenOut);
 STATIC EFI_STATUS AvbParse_HashDescriptor (IN CONST UINT8 *Descriptor, IN UINT64 DescriptorLen, OUT CONST UINT8 **PartitionNameOut, OUT UINT32 *PartitionNameLenOut, OUT CONST UINT8 **DigestOut, OUT UINT32 *DigestLenOut, OUT CONST UINT8 **SaltOut, OUT UINT32 *SaltLenOut, OUT UINT64 *ImageSizeOut);
+STATIC EFI_STATUS AvbParse_HashtreeDescriptor (IN CONST UINT8 *Descriptor, IN UINT64 DescriptorLen, OUT CONST UINT8 **PartitionNameOut, OUT UINT32 *PartitionNameLenOut);
 STATIC EFI_STATUS AvbParse_ChainPartitionDescriptor (IN CONST UINT8 *Descriptor, IN UINT64 DescriptorLen, OUT CONST UINT8 **PartitionNameOut, OUT UINT32 *PartitionNameLenOut, OUT CONST UINT8 **PublicKeyOut, OUT UINT32 *PublicKeyLenOut);
 #endif
 
@@ -4645,22 +4647,36 @@ typedef struct {
   CONST CHAR8        *Name;
   CONST CHAR8        *VarStatusName;
   CONST CHAR8        *VarDescName;
+  CONST CHAR8        *VarPresentName;
   CHAR8               Status[MAX_RSP_SIZE];
   CHAR8               DescType[MAX_RSP_SIZE];
+  CHAR8               Present[MAX_RSP_SIZE];
 } GBL_VBMETA_PART_VAR;
 
 STATIC CHAR8 mVbmetaSlot[MAX_RSP_SIZE]         = "unknown";
 STATIC CHAR8 mVbmetaWarning[MAX_RSP_SIZE]      = "none";
-STATIC CHAR8 mVbmetaCapabilities[MAX_RSP_SIZE] = "slot,status,descriptor-type,warning";
+STATIC CHAR8 mVbmetaCapabilities[MAX_RSP_SIZE] = "slot,status,descriptor-type,present,warning";
 
 STATIC GBL_VBMETA_PART_VAR mVbmetaPartVars[] = {
-  {"boot",          "vbmeta:boot:status",          "vbmeta:boot:descriptor-type",          "unknown", "unknown"},
-  {"init_boot",     "vbmeta:init_boot:status",     "vbmeta:init_boot:descriptor-type",     "unknown", "unknown"},
-  {"vendor_boot",   "vbmeta:vendor_boot:status",   "vbmeta:vendor_boot:descriptor-type",   "unknown", "unknown"},
-  {"recovery",      "vbmeta:recovery:status",      "vbmeta:recovery:descriptor-type",      "unknown", "unknown"},
-  {"dtbo",          "vbmeta:dtbo:status",          "vbmeta:dtbo:descriptor-type",          "unknown", "unknown"},
-  {"vbmeta_system", "vbmeta:vbmeta_system:status", "vbmeta:vbmeta_system:descriptor-type", "unknown", "unknown"},
-  {"vbmeta_vendor", "vbmeta:vbmeta_vendor:status", "vbmeta:vbmeta_vendor:descriptor-type", "unknown", "unknown"},
+  {"boot",               "vbmeta:boot:status",               "vbmeta:boot:descriptor-type",               "vbmeta:boot:present",               "unknown", "unknown", "unknown"},
+  {"init_boot",          "vbmeta:init_boot:status",          "vbmeta:init_boot:descriptor-type",          "vbmeta:init_boot:present",          "unknown", "unknown", "unknown"},
+  {"vendor_boot",        "vbmeta:vendor_boot:status",        "vbmeta:vendor_boot:descriptor-type",        "vbmeta:vendor_boot:present",        "unknown", "unknown", "unknown"},
+  {"vendor_kernel_boot", "vbmeta:vendor_kernel_boot:status", "vbmeta:vendor_kernel_boot:descriptor-type", "vbmeta:vendor_kernel_boot:present", "unknown", "unknown", "unknown"},
+  {"dtbo",               "vbmeta:dtbo:status",               "vbmeta:dtbo:descriptor-type",               "vbmeta:dtbo:present",               "unknown", "unknown", "unknown"},
+  {"recovery",           "vbmeta:recovery:status",           "vbmeta:recovery:descriptor-type",           "vbmeta:recovery:present",           "unknown", "unknown", "unknown"},
+  {"pvmfw",              "vbmeta:pvmfw:status",              "vbmeta:pvmfw:descriptor-type",              "vbmeta:pvmfw:present",              "unknown", "unknown", "unknown"},
+  {"vbmeta_system",      "vbmeta:vbmeta_system:status",      "vbmeta:vbmeta_system:descriptor-type",      "vbmeta:vbmeta_system:present",      "unknown", "unknown", "unknown"},
+  {"vbmeta_vendor",      "vbmeta:vbmeta_vendor:status",      "vbmeta:vbmeta_vendor:descriptor-type",      "vbmeta:vbmeta_vendor:present",      "unknown", "unknown", "unknown"},
+  {"vbmeta_odm",         "vbmeta:vbmeta_odm:status",         "vbmeta:vbmeta_odm:descriptor-type",         "vbmeta:vbmeta_odm:present",         "unknown", "unknown", "unknown"},
+  {"vbmeta_dlkm",        "vbmeta:vbmeta_dlkm:status",        "vbmeta:vbmeta_dlkm:descriptor-type",        "vbmeta:vbmeta_dlkm:present",        "unknown", "unknown", "unknown"},
+  {"system",             "vbmeta:system:status",             "vbmeta:system:descriptor-type",             "vbmeta:system:present",             "unknown", "unknown", "unknown"},
+  {"system_ext",         "vbmeta:system_ext:status",         "vbmeta:system_ext:descriptor-type",         "vbmeta:system_ext:present",         "unknown", "unknown", "unknown"},
+  {"product",            "vbmeta:product:status",            "vbmeta:product:descriptor-type",            "vbmeta:product:present",            "unknown", "unknown", "unknown"},
+  {"vendor",             "vbmeta:vendor:status",             "vbmeta:vendor:descriptor-type",             "vbmeta:vendor:present",             "unknown", "unknown", "unknown"},
+  {"odm",                "vbmeta:odm:status",                "vbmeta:odm:descriptor-type",                "vbmeta:odm:present",                "unknown", "unknown", "unknown"},
+  {"system_dlkm",        "vbmeta:system_dlkm:status",        "vbmeta:system_dlkm:descriptor-type",        "vbmeta:system_dlkm:present",        "unknown", "unknown", "unknown"},
+  {"vendor_dlkm",        "vbmeta:vendor_dlkm:status",        "vbmeta:vendor_dlkm:descriptor-type",        "vbmeta:vendor_dlkm:present",        "unknown", "unknown", "unknown"},
+  {"odm_dlkm",           "vbmeta:odm_dlkm:status",           "vbmeta:odm_dlkm:descriptor-type",           "vbmeta:odm_dlkm:present",           "unknown", "unknown", "unknown"},
 };
 
 STATIC EFI_STATUS
@@ -4765,6 +4781,34 @@ AvbParse_HashDescriptor (
 }
 
 STATIC EFI_STATUS
+AvbParse_HashtreeDescriptor (
+  IN  CONST UINT8   *Descriptor,
+  IN  UINT64         DescriptorLen,
+  OUT CONST UINT8  **PartitionNameOut,
+  OUT UINT32        *PartitionNameLenOut
+  )
+{
+  AvbHashtreeDescriptor HostDesc;
+  CONST UINT8          *Body;
+
+  if (Descriptor == NULL || PartitionNameOut == NULL || PartitionNameLenOut == NULL)
+    return EFI_INVALID_PARAMETER;
+  if (DescriptorLen < sizeof (AvbHashtreeDescriptor))
+    return EFI_INVALID_PARAMETER;
+  if (!avb_hashtree_descriptor_validate_and_byteswap (
+          (CONST AvbHashtreeDescriptor *)Descriptor, &HostDesc))
+    return EFI_INVALID_PARAMETER;
+  if ((UINT64)sizeof (AvbHashtreeDescriptor) + HostDesc.partition_name_len +
+      HostDesc.salt_len + HostDesc.root_digest_len > DescriptorLen)
+    return EFI_INVALID_PARAMETER;
+
+  Body = Descriptor + sizeof (AvbHashtreeDescriptor);
+  *PartitionNameOut    = Body;
+  *PartitionNameLenOut = HostDesc.partition_name_len;
+  return EFI_SUCCESS;
+}
+
+STATIC EFI_STATUS
 AvbParse_ChainPartitionDescriptor (
   IN  CONST UINT8   *Descriptor,
   IN  UINT64         DescriptorLen,
@@ -4799,9 +4843,10 @@ AvbParse_ChainPartitionDescriptor (
 
 /* Descriptor type tags seen in the walk */
 typedef enum {
-  GblPartDescNone  = 0,
-  GblPartDescHash  = 1,
-  GblPartDescChain = 2,
+  GblPartDescNone     = 0,
+  GblPartDescHash     = 1,
+  GblPartDescHashtree = 2,
+  GblPartDescChain    = 3,
 } GBL_PART_DESC_TYPE;
 
 /*
@@ -4945,6 +4990,16 @@ GblVbmetaLookupDescriptor (
       }
       *PubKeyOut    = NULL;
       *PubKeyLenOut = 0;
+    } else if (Tag == GblAvbDescHashtreeTag) {
+      if (EFI_ERROR (AvbParse_HashtreeDescriptor (Desc, DescLen,
+                                                  &DName, &DNameLen)))
+        continue;
+      if (DNameLen != PartNameLen)
+        continue;
+      if (CompareMem (DName, PartName, DNameLen) == 0) {
+        *TypeOut = GblPartDescHashtree;
+        return EFI_SUCCESS;
+      }
     } else {
       /* Skip other descriptor types */
 
@@ -4952,6 +5007,18 @@ GblVbmetaLookupDescriptor (
   }
 
   return EFI_SUCCESS;  /* *TypeOut == GblPartDescNone → not found */
+}
+
+STATIC BOOLEAN
+GblVbmetaPartExists (IN CONST CHAR8 *PartName)
+{
+  EFI_BLOCK_IO_PROTOCOL *BlockIo = NULL;
+  EFI_HANDLE            *Handle  = NULL;
+  CHAR16                 ResolvedName[MAX_GPT_NAME_SIZE];
+
+  return !EFI_ERROR (LocateActiveSlotPartition (PartName, &BlockIo, &Handle,
+                                                ResolvedName, ARRAY_SIZE (ResolvedName))) &&
+         BlockIo != NULL;
 }
 
 STATIC VOID
@@ -4986,23 +5053,40 @@ GblVbmetaSetPartStatus (
                                       &PubKey, &PubKeyLen,
                                       NULL, NULL, NULL);
   if (EFI_ERROR (Status)) {
+    AsciiStrnCpyS (Part->Present, sizeof (Part->Present),
+                   GblVbmetaPartExists (Part->Name) ? "yes" : "no",
+                   sizeof (Part->Present) - 1);
     AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "error", sizeof (Part->Status) - 1);
     AsciiStrnCpyS (Part->DescType, sizeof (Part->DescType), "error", sizeof (Part->DescType) - 1);
+    return;
+  }
+
+  AsciiStrnCpyS (Part->Present, sizeof (Part->Present),
+                 GblVbmetaPartExists (Part->Name) ? "yes" : "no",
+                 sizeof (Part->Present) - 1);
+
+  if (AsciiStrCmp (Part->Present, "no") == 0) {
+    AsciiStrnCpyS (Part->DescType, sizeof (Part->DescType), "n/a", sizeof (Part->DescType) - 1);
+    AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "n/a", sizeof (Part->Status) - 1);
     return;
   }
 
   switch (Type) {
   case GblPartDescHash:
     AsciiStrnCpyS (Part->DescType, sizeof (Part->DescType), "hash", sizeof (Part->DescType) - 1);
-    AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "ok", sizeof (Part->Status) - 1);
+    AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "covered-hash", sizeof (Part->Status) - 1);
+    break;
+  case GblPartDescHashtree:
+    AsciiStrnCpyS (Part->DescType, sizeof (Part->DescType), "hashtree", sizeof (Part->DescType) - 1);
+    AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "covered-hashtree", sizeof (Part->Status) - 1);
     break;
   case GblPartDescChain:
     AsciiStrnCpyS (Part->DescType, sizeof (Part->DescType), "chain", sizeof (Part->DescType) - 1);
-    AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "ok", sizeof (Part->Status) - 1);
+    AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "covered-chain", sizeof (Part->Status) - 1);
     break;
   default:
     AsciiStrnCpyS (Part->DescType, sizeof (Part->DescType), "none", sizeof (Part->DescType) - 1);
-    AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "unsigned", sizeof (Part->Status) - 1);
+    AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "uncovered", sizeof (Part->Status) - 1);
     break;
   }
 }
@@ -5016,21 +5100,19 @@ GblVbmetaBuildWarning (VOID)
 
   AsciiStrnCpyS (mVbmetaWarning, sizeof (mVbmetaWarning), "none", sizeof (mVbmetaWarning) - 1);
   for (Idx = 0; Idx < ARRAY_SIZE (mVbmetaPartVars); Idx++) {
-    if (AsciiStrCmp (mVbmetaPartVars[Idx].Name, "boot") != 0 &&
-        AsciiStrCmp (mVbmetaPartVars[Idx].Name, "init_boot") != 0 &&
-        AsciiStrCmp (mVbmetaPartVars[Idx].Name, "vendor_boot") != 0 &&
-        AsciiStrCmp (mVbmetaPartVars[Idx].Name, "recovery") != 0)
-      continue;
-    if (AsciiStrCmp (mVbmetaPartVars[Idx].Status, "unsigned") != 0)
+    if (AsciiStrCmp (mVbmetaPartVars[Idx].Status, "uncovered") != 0 &&
+        AsciiStrCmp (mVbmetaPartVars[Idx].Status, "error") != 0)
       continue;
 
     if (First) {
-      AsciiStrnCpyS (mVbmetaWarning, sizeof (mVbmetaWarning),
-                     "unsigned:", sizeof (mVbmetaWarning) - 1);
       First = FALSE;
     } else {
       AsciiStrnCatS (mVbmetaWarning, sizeof (mVbmetaWarning), ",", AsciiStrLen (","));
     }
+    AsciiStrnCatS (mVbmetaWarning, sizeof (mVbmetaWarning),
+                   mVbmetaPartVars[Idx].Status,
+                   AsciiStrLen (mVbmetaPartVars[Idx].Status));
+    AsciiStrnCatS (mVbmetaWarning, sizeof (mVbmetaWarning), ":", AsciiStrLen (":"));
     AsciiStrnCatS (mVbmetaWarning, sizeof (mVbmetaWarning),
                    mVbmetaPartVars[Idx].Name,
                    AsciiStrLen (mVbmetaPartVars[Idx].Name));
@@ -5058,6 +5140,9 @@ GblProbeVbmetaVars (VOID)
                      sizeof (mVbmetaPartVars[Idx].Status) - 1);
       AsciiStrnCpyS (mVbmetaPartVars[Idx].DescType, sizeof (mVbmetaPartVars[Idx].DescType),
                      "unknown", sizeof (mVbmetaPartVars[Idx].DescType) - 1);
+      AsciiStrnCpyS (mVbmetaPartVars[Idx].Present, sizeof (mVbmetaPartVars[Idx].Present),
+                     GblVbmetaPartExists (mVbmetaPartVars[Idx].Name) ? "yes" : "no",
+                     sizeof (mVbmetaPartVars[Idx].Present) - 1);
     }
     GblVbmetaBuildWarning ();
     return;
@@ -5085,6 +5170,8 @@ GblPublishVbmetaVars (VOID)
                         mVbmetaPartVars[Idx].Status);
     FastbootPublishVar (mVbmetaPartVars[Idx].VarDescName,
                         mVbmetaPartVars[Idx].DescType);
+    FastbootPublishVar (mVbmetaPartVars[Idx].VarPresentName,
+                        mVbmetaPartVars[Idx].Present);
   }
 }
 
