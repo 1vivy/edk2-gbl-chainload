@@ -4485,9 +4485,13 @@ STATIC EFI_STATUS
 WriteAllowUnlockValue (UINT32 Value)
 {
   EFI_STATUS             Status;
+  EFI_STATUS             FlushStatus;
   EFI_BLOCK_IO_PROTOCOL *BlockIo = NULL;
   EFI_HANDLE            *Handle  = NULL;
   UINT8                 *Buffer;
+  UINT32                 After;
+  UINT8                  BeforeByte;
+  UINT8                  AfterByte;
 
   Status = PartitionGetInfo ((CHAR16 *)L"frp", &BlockIo, &Handle);
   if (EFI_ERROR (Status))
@@ -4508,22 +4512,48 @@ WriteAllowUnlockValue (UINT32 Value)
     return Status;
   }
 
+  BeforeByte = Buffer[BlockIo->Media->BlockSize - 1];
+
   if (Value)
     Buffer[BlockIo->Media->BlockSize - 1] |= 0x01;
   else
     Buffer[BlockIo->Media->BlockSize - 1] &= ~0x01;
+
+  AfterByte = Buffer[BlockIo->Media->BlockSize - 1];
 
   Status = BlockIo->WriteBlocks (BlockIo, BlockIo->Media->MediaId,
                                  BlockIo->Media->LastBlock,
                                  BlockIo->Media->BlockSize, Buffer);
   FreePool (Buffer);
 
-  if (!EFI_ERROR (Status)) {
-    IsAllowUnlock = Value & 0x01;
-    UpdateOemUnlockAllowedVar ();
+  DEBUG ((EFI_D_INFO,
+          "GBL: OEM unlock FRP write LastBlock=%Lu BlockSize=%u before=0x%02x after=0x%02x status=%r\n",
+          BlockIo->Media->LastBlock, BlockIo->Media->BlockSize,
+          BeforeByte, AfterByte, Status));
+
+  if (EFI_ERROR (Status))
+    return Status;
+
+  if (BlockIo->FlushBlocks != NULL) {
+    FlushStatus = BlockIo->FlushBlocks (BlockIo);
+    DEBUG ((EFI_D_INFO, "GBL: OEM unlock FRP flush status=%r\n", FlushStatus));
+    if (EFI_ERROR (FlushStatus))
+      return FlushStatus;
   }
 
-  return Status;
+  After = 0;
+  Status = ReadAllowUnlockValue (&After);
+  DEBUG ((EFI_D_INFO, "GBL: OEM unlock FRP readback value=%u status=%r\n", After, Status));
+  if (EFI_ERROR (Status))
+    return Status;
+
+  if ((After & 0x01) != (Value & 0x01))
+    return EFI_DEVICE_ERROR;
+
+  IsAllowUnlock = Value & 0x01;
+  UpdateOemUnlockAllowedVar ();
+
+  return EFI_SUCCESS;
 }
 
 EFI_STATUS
@@ -5035,17 +5065,6 @@ GblProbeVbmetaVars (VOID)
 
   for (Idx = 0; Idx < ARRAY_SIZE (mVbmetaPartVars); Idx++)
     GblVbmetaSetPartStatus (&mVbmetaPartVars[Idx], VbmBuf, VbmSize);
-
-#if defined (GBL_MODE) && (GBL_MODE == 1)
-  for (Idx = 0; Idx < ARRAY_SIZE (mVbmetaPartVars); Idx++) {
-    if (AsciiStrCmp (mVbmetaPartVars[Idx].Name, "recovery") == 0) {
-      AsciiStrnCpyS (mVbmetaPartVars[Idx].Status,
-                     sizeof (mVbmetaPartVars[Idx].Status),
-                     "unsigned", sizeof (mVbmetaPartVars[Idx].Status) - 1);
-      break;
-    }
-  }
-#endif
 
   FreePool (VbmBuf);
   GblVbmetaBuildWarning ();
