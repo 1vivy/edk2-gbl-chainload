@@ -458,8 +458,8 @@ UpdateFastbootOptionItem (UINT32 OptionItem, UINT32 *pLocation)
     Location += Height;
     Location += LineHeight;
   }
-  /* No else: an absent AVB warning reserves no vertical space. */
 #endif
+    Location += LineHeight;
 
 #if (GBL_MODE == 2)
   GblFastbootGetMode2Warning (Mode2Warning, sizeof (Mode2Warning));
@@ -478,7 +478,6 @@ UpdateFastbootOptionItem (UINT32 OptionItem, UINT32 *pLocation)
     Location += Height;
     Location += LineHeight;
   }
-  /* No else: an absent MODE-2 warning reserves no vertical space. */
 #endif
 
 Exit:
