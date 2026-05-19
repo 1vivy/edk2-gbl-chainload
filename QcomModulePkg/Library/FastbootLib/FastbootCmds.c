@@ -4449,8 +4449,8 @@ CmdOemBootEfiBlockIo (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
  * FastbootLib to reappear, then send `fastboot oem escape`. CmdRebootRecovery
  * uses a recovery reset reason instead of BCB, so the reason is preserved for
  * stock ABL while GBL itself avoids persistent BCB state. */
-STATIC VOID
-CmdOemEscape (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+EFI_STATUS
+GblFastbootEscapeToBootFlow (VOID)
 {
   EFI_STATUS Status;
 
@@ -4466,6 +4466,13 @@ CmdOemEscape (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   DEBUG ((EFI_D_ERROR,
           "oem escape: BootFlowChainLoad returned %r\n",
           Status));
+  return Status;
+}
+
+STATIC VOID
+CmdOemEscape (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  (VOID)GblFastbootEscapeToBootFlow ();
 }
 
 /*

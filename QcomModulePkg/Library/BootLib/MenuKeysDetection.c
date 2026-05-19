@@ -82,6 +82,7 @@
 #include <Library/BootESP.h>
 
 extern EFI_STATUS GblFastbootEnableOemUnlockAllowed (VOID);
+extern EFI_STATUS GblFastbootEscapeToBootFlow (VOID);
 #include <Uefi.h>
 
 #if defined (AUTO_DEBUG_MODE) || defined (MODE_DEBUG) || defined (MODE_TEMPLATE) || defined (FAKELOCKED) || defined (FAKELOCKED_DEBUG)
@@ -218,9 +219,7 @@ UpdateDeviceStatus (OPTION_MENU_INFO *MsgInfo, INTN Reason)
     break;
   case ESCAPE:
     {
-      extern EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
-      ExitMenuKeysDetection ();
-      BootFlowChainLoad ();
+      GblFastbootEscapeToBootFlow ();
       DisplayFastbootMenu ();
       DEBUG ((EFI_D_WARN, "Escape chainload returned, back to fastboot menu\n"));
       break;
