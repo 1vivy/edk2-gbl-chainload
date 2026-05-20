@@ -82,7 +82,7 @@ found at
 #endif
 #if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
 EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
-#include <avb/libavb/libavb.h>
+#include <Library/AvbParseLib.h>
 #endif
 #include <Protocol/DiskIo.h>
 #include <Protocol/EFIUsbDevice.h>
@@ -113,28 +113,6 @@ STATIC EFI_GUID  gGblStagedBufferGuid = GBL_STAGED_BUFFER_GUID;
 
 STATIC GBL_STAGED_BUFFER_TABLE  gGblStagedBufferRecord;
 
-#if defined (GBL_EXPERIMENTAL_FASTBOOT_CMDS)
-typedef AvbVBMetaImageHeader GBL_AVB_VBMETA_HEADER;
-typedef AvbDescriptorTag     GBL_AVB_DESCRIPTOR_TAG;
-
-#define GBL_AVB_VBMETA_HEADER_SIZE AVB_VBMETA_IMAGE_HEADER_SIZE
-
-/* Short aliases used by this file's libavb-backed descriptor walker. */
-#define AvbMajorVersion               required_libavb_version_major
-#define AvbMinorVersion               required_libavb_version_minor
-#define AlgorithmType                 algorithm_type
-#define AuthenticationDataBlockSize   authentication_data_block_size
-#define AuxiliaryDataBlockSize        auxiliary_data_block_size
-#define Flags                         flags
-
-#define GblAvbDescHashTag             AVB_DESCRIPTOR_TAG_HASH
-#define GblAvbDescChainPartitionTag   AVB_DESCRIPTOR_TAG_CHAIN_PARTITION
-
-STATIC EFI_STATUS AvbParse_VbmetaHeader (IN CONST UINT8 *Vbmeta, IN UINT64 VbmetaSize, OUT GBL_AVB_VBMETA_HEADER *HeaderOut);
-STATIC EFI_STATUS AvbParse_NextDescriptor (IN CONST UINT8 *AuxBlock, IN UINT64 AuxSize, IN OUT UINT64 *Cursor, OUT GBL_AVB_DESCRIPTOR_TAG *TagOut, OUT CONST UINT8 **DescriptorOut, OUT UINT64 *DescriptorLenOut);
-STATIC EFI_STATUS AvbParse_HashDescriptor (IN CONST UINT8 *Descriptor, IN UINT64 DescriptorLen, OUT CONST UINT8 **PartitionNameOut, OUT UINT32 *PartitionNameLenOut, OUT CONST UINT8 **DigestOut, OUT UINT32 *DigestLenOut, OUT CONST UINT8 **SaltOut, OUT UINT32 *SaltLenOut, OUT UINT64 *ImageSizeOut);
-STATIC EFI_STATUS AvbParse_ChainPartitionDescriptor (IN CONST UINT8 *Descriptor, IN UINT64 DescriptorLen, OUT CONST UINT8 **PartitionNameOut, OUT UINT32 *PartitionNameLenOut, OUT CONST UINT8 **PublicKeyOut, OUT UINT32 *PublicKeyLenOut);
-#endif
 
 STATIC struct GetVarPartitionInfo part_info[] = {
     {"system", "partition-size:", "partition-type:", "", "ext4"},
@@ -4646,140 +4624,6 @@ STATIC GBL_VBMETA_PART_VAR mVbmetaPartVars[] = {
   {"vbmeta_system", "vbmeta:vbmeta_system:status", "vbmeta:vbmeta_system:descriptor-type", "unknown", "unknown"},
   {"vbmeta_vendor", "vbmeta:vbmeta_vendor:status", "vbmeta:vbmeta_vendor:descriptor-type", "unknown", "unknown"},
 };
-
-STATIC EFI_STATUS
-AvbParse_VbmetaHeader (
-  IN  CONST UINT8              *Vbmeta,
-  IN  UINT64                    VbmetaSize,
-  OUT GBL_AVB_VBMETA_HEADER    *HeaderOut
-  )
-{
-  AvbVBMetaVerifyResult Result;
-
-  if (Vbmeta == NULL || HeaderOut == NULL)
-    return EFI_INVALID_PARAMETER;
-
-  Result = avb_vbmeta_image_verify (Vbmeta, (size_t)VbmetaSize, NULL, NULL);
-  if (Result != AVB_VBMETA_VERIFY_RESULT_OK &&
-      Result != AVB_VBMETA_VERIFY_RESULT_OK_NOT_SIGNED)
-    return EFI_VOLUME_CORRUPTED;
-
-  avb_vbmeta_image_header_to_host_byte_order (
-      (CONST AvbVBMetaImageHeader *)Vbmeta, HeaderOut);
-  return EFI_SUCCESS;
-}
-
-STATIC EFI_STATUS
-AvbParse_NextDescriptor (
-  IN  CONST UINT8              *AuxBlock,
-  IN  UINT64                    AuxSize,
-  IN OUT UINT64                *Cursor,
-  OUT GBL_AVB_DESCRIPTOR_TAG   *TagOut,
-  OUT CONST UINT8             **DescriptorOut,
-  OUT UINT64                   *DescriptorLenOut
-  )
-{
-  CONST AvbDescriptor *Desc;
-  AvbDescriptor       HostDesc;
-  UINT64              Total;
-
-  if (AuxBlock == NULL || Cursor == NULL || TagOut == NULL ||
-      DescriptorOut == NULL || DescriptorLenOut == NULL)
-    return EFI_INVALID_PARAMETER;
-  if (*Cursor == AuxSize)
-    return EFI_END_OF_MEDIA;
-  if (*Cursor > AuxSize || AuxSize - *Cursor < sizeof (AvbDescriptor))
-    return EFI_INVALID_PARAMETER;
-
-  Desc = (CONST AvbDescriptor *)(AuxBlock + *Cursor);
-  if (!avb_descriptor_validate_and_byteswap (Desc, &HostDesc))
-    return EFI_INVALID_PARAMETER;
-
-  Total = sizeof (AvbDescriptor) + HostDesc.num_bytes_following;
-  if (*Cursor + Total > AuxSize)
-    return EFI_INVALID_PARAMETER;
-
-  *TagOut           = (GBL_AVB_DESCRIPTOR_TAG)HostDesc.tag;
-  *DescriptorOut    = (CONST UINT8 *)Desc;
-  *DescriptorLenOut = Total;
-  *Cursor          += Total;
-  return EFI_SUCCESS;
-}
-
-STATIC EFI_STATUS
-AvbParse_HashDescriptor (
-  IN  CONST UINT8   *Descriptor,
-  IN  UINT64         DescriptorLen,
-  OUT CONST UINT8  **PartitionNameOut,
-  OUT UINT32        *PartitionNameLenOut,
-  OUT CONST UINT8  **DigestOut,
-  OUT UINT32        *DigestLenOut,
-  OUT CONST UINT8  **SaltOut OPTIONAL,
-  OUT UINT32        *SaltLenOut OPTIONAL,
-  OUT UINT64        *ImageSizeOut OPTIONAL
-  )
-{
-  AvbHashDescriptor HostDesc;
-  CONST UINT8      *Body;
-
-  if (Descriptor == NULL || PartitionNameOut == NULL ||
-      PartitionNameLenOut == NULL || DigestOut == NULL || DigestLenOut == NULL)
-    return EFI_INVALID_PARAMETER;
-  if (DescriptorLen < sizeof (AvbHashDescriptor))
-    return EFI_INVALID_PARAMETER;
-  if (!avb_hash_descriptor_validate_and_byteswap (
-          (CONST AvbHashDescriptor *)Descriptor, &HostDesc))
-    return EFI_INVALID_PARAMETER;
-  if ((UINT64)sizeof (AvbHashDescriptor) + HostDesc.partition_name_len +
-      HostDesc.salt_len + HostDesc.digest_len > DescriptorLen)
-    return EFI_INVALID_PARAMETER;
-
-  Body = Descriptor + sizeof (AvbHashDescriptor);
-  *PartitionNameOut    = Body;
-  *PartitionNameLenOut = HostDesc.partition_name_len;
-  *DigestOut           = Body + HostDesc.partition_name_len + HostDesc.salt_len;
-  *DigestLenOut        = HostDesc.digest_len;
-  if (SaltOut != NULL)
-    *SaltOut = Body + HostDesc.partition_name_len;
-  if (SaltLenOut != NULL)
-    *SaltLenOut = HostDesc.salt_len;
-  if (ImageSizeOut != NULL)
-    *ImageSizeOut = HostDesc.image_size;
-  return EFI_SUCCESS;
-}
-
-STATIC EFI_STATUS
-AvbParse_ChainPartitionDescriptor (
-  IN  CONST UINT8   *Descriptor,
-  IN  UINT64         DescriptorLen,
-  OUT CONST UINT8  **PartitionNameOut,
-  OUT UINT32        *PartitionNameLenOut,
-  OUT CONST UINT8  **PublicKeyOut,
-  OUT UINT32        *PublicKeyLenOut
-  )
-{
-  AvbChainPartitionDescriptor HostDesc;
-  CONST UINT8                *Body;
-
-  if (Descriptor == NULL || PartitionNameOut == NULL ||
-      PartitionNameLenOut == NULL || PublicKeyOut == NULL || PublicKeyLenOut == NULL)
-    return EFI_INVALID_PARAMETER;
-  if (DescriptorLen < sizeof (AvbChainPartitionDescriptor))
-    return EFI_INVALID_PARAMETER;
-  if (!avb_chain_partition_descriptor_validate_and_byteswap (
-          (CONST AvbChainPartitionDescriptor *)Descriptor, &HostDesc))
-    return EFI_INVALID_PARAMETER;
-  if ((UINT64)sizeof (AvbChainPartitionDescriptor) +
-      HostDesc.partition_name_len + HostDesc.public_key_len > DescriptorLen)
-    return EFI_INVALID_PARAMETER;
-
-  Body = Descriptor + sizeof (AvbChainPartitionDescriptor);
-  *PartitionNameOut    = Body;
-  *PartitionNameLenOut = HostDesc.partition_name_len;
-  *PublicKeyOut        = Body + HostDesc.partition_name_len;
-  *PublicKeyLenOut     = HostDesc.public_key_len;
-  return EFI_SUCCESS;
-}
 
 /* Descriptor type tags seen in the walk */
 typedef enum {

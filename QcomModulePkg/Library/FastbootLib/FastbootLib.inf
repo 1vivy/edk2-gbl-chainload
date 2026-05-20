@@ -150,6 +150,7 @@
   UbsanLib
   CompilerIntrinsicsLib
   AvbLib
+  AvbParseLib
 
 [Protocols]
   gEfiSimpleTextInProtocolGuid
