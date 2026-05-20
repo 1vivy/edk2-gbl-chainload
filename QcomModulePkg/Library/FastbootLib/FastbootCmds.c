@@ -113,7 +113,6 @@ STATIC EFI_GUID  gGblStagedBufferGuid = GBL_STAGED_BUFFER_GUID;
 
 STATIC GBL_STAGED_BUFFER_TABLE  gGblStagedBufferRecord;
 
-
 STATIC struct GetVarPartitionInfo part_info[] = {
     {"system", "partition-size:", "partition-type:", "", "ext4"},
     {"userdata", "partition-size:", "partition-type:", "", "ext4"},
