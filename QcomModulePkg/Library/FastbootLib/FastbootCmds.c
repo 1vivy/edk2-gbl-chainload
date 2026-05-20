@@ -5029,17 +5029,6 @@ GblProbeVbmetaVars (VOID)
   for (Idx = 0; Idx < ARRAY_SIZE (mVbmetaPartVars); Idx++)
     GblVbmetaSetPartStatus (&mVbmetaPartVars[Idx], VbmBuf, VbmSize);
 
-#if defined (GBL_MODE) && (GBL_MODE == 1)
-  for (Idx = 0; Idx < ARRAY_SIZE (mVbmetaPartVars); Idx++) {
-    if (AsciiStrCmp (mVbmetaPartVars[Idx].Name, "recovery") == 0) {
-      AsciiStrnCpyS (mVbmetaPartVars[Idx].Status,
-                     sizeof (mVbmetaPartVars[Idx].Status),
-                     "unsigned", sizeof (mVbmetaPartVars[Idx].Status) - 1);
-      break;
-    }
-  }
-#endif
-
   FreePool (VbmBuf);
   GblVbmetaBuildWarning ();
 }
