@@ -82,6 +82,8 @@
 #include <Library/BootESP.h>
 
 extern EFI_STATUS GblFastbootEnableOemUnlockAllowed (VOID);
+extern BOOLEAN GblFastbootEscapePending;
+extern BOOLEAN GblFastbootEspBootPending;
 #include <Uefi.h>
 
 #if defined (AUTO_DEBUG_MODE) || defined (MODE_DEBUG) || defined (MODE_TEMPLATE) || defined (FAKELOCKED) || defined (FAKELOCKED_DEBUG)
@@ -141,6 +143,19 @@ VOID WaitForExitKeysDetection (VOID)
       MicroSecondDelay (10000);
     }
   }
+}
+
+/* Runs at TPL_APPLICATION from the fastboot main loop after the menu
+ * ESP case sets GblFastbootEspBootPending. Same deferred-dispatch
+ * pattern as GblFastbootEscapeToBootFlow. Visible to FastbootMain.c
+ * via extern. */
+EFI_STATUS
+GblFastbootEspBootDeferred (VOID)
+{
+  EFI_STATUS Status = BootESP ();
+  /* Only reachable if BootESP returned (i.e. failed to load). */
+  DEBUG ((EFI_D_ERROR, "Boot to ESP failed, please check the ESP partition existence (status=%r)\n", Status));
+  return Status;
 }
 
 STATIC VOID
@@ -210,20 +225,24 @@ UpdateDeviceStatus (OPTION_MENU_INFO *MsgInfo, INTN Reason)
           "Reset unbootable slots failed enter fastboot mode\n"));
     break;
   case ESP:
-    ExitMenuKeysDetection();
-    Status = BootESP();
-    DisplayFastbootMenu ();
-    DEBUG ((EFI_D_WARN,
-          "Boot to ESP failed, please check the ESP partition existence\n"));
-    break;
+    {
+      /* Do NOT call BootESP from this timer-notify; we run at TPL_CALLBACK
+       * and image-load isn't safe at that TPL. Defer to the fastboot main
+       * loop, which runs at TPL_APPLICATION. See GblFastbootEspBootDeferred
+       * and the drain in FastbootMain.c main loop. */
+      ExitMenuKeysDetection ();
+      GblFastbootEspBootPending = TRUE;
+      return;  /* main loop will pick this up */
+    }
   case ESCAPE:
     {
-      extern EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
+      /* Do NOT call BootFlowChainLoad from this timer-notify; we run at
+       * TPL_CALLBACK and the chainload path is not safe at that TPL.
+       * Defer to the fastboot main loop, which runs at TPL_APPLICATION.
+       * See FastbootMain.c main loop and GblFastbootEscapeToBootFlow. */
       ExitMenuKeysDetection ();
-      BootFlowChainLoad ();
-      DisplayFastbootMenu ();
-      DEBUG ((EFI_D_WARN, "Escape chainload returned, back to fastboot menu\n"));
-      break;
+      GblFastbootEscapePending = TRUE;
+      return;  /* return from UpdateDeviceStatus; main loop will pick this up */
     }
   case OEMUNLOCKENABLE:
     Status = GblFastbootEnableOemUnlockAllowed ();
