@@ -5074,6 +5074,7 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
   FastbootPublishVar ("gbl-chainload_mode", "undef");
 #endif
   FastbootPublishVar ("gbl-chainload_date", __DATE__ " " __TIME__);
+  FastbootPublishVar ("gbl-chainload_version", GBL_CHAINLOAD_VERSION);
 #ifdef GBL_AUTO
   FastbootPublishVar ("gbl-chainload_auto", GBL_STR(GBL_AUTO));
 #else
