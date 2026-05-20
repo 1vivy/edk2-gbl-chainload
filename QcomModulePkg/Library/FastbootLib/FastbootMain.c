@@ -97,6 +97,9 @@ found at
 #include "FastbootMain.h"
 #include "UsbDescriptors.h"
 
+extern BOOLEAN GblFastbootEscapePending;
+extern EFI_STATUS GblFastbootEscapeToBootFlow (VOID);
+
 #define USB_BUFF_SIZE USB_BUFFER_SIZE
 
 /* Global fastboot data */
@@ -415,6 +418,15 @@ EFI_STATUS FastbootInitialize (VOID)
     if (EFI_ERROR (Status) && (Status != EFI_ABORTED)) {
       DEBUG ((EFI_D_ERROR, "Error, failed to handle USB event\n"));
       break;
+    }
+
+    /* Menu Escape handler runs at TPL_CALLBACK in a timer notify and
+     * defers the actual chainload here, where we're at TPL_APPLICATION. */
+    if (GblFastbootEscapePending) {
+      GblFastbootEscapePending = FALSE;
+      (VOID)GblFastbootEscapeToBootFlow ();
+      /* On success BootFlowChainLoad does not return; on failure fall
+       * through and let the next iteration handle the host. */
     }
 
     if (FastbootFatal ()) {

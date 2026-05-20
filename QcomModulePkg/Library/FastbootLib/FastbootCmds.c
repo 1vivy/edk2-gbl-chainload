@@ -163,6 +163,11 @@ CheckVirtualAbCriticalPartition (CHAR16 *PartitionName);
 
 STATIC FASTBOOT_VAR *Varlist;
 STATIC BOOLEAN Finished = FALSE;
+
+/* Set TRUE by the menu Escape key handler (which runs at TPL_CALLBACK
+ * inside a timer notify and cannot safely call BootFlowChainLoad).
+ * Drained by the fastboot main loop (FastbootMain.c) at TPL_APPLICATION. */
+BOOLEAN GblFastbootEscapePending = FALSE;
 STATIC CHAR8 StrSerialNum[MAX_RSP_SIZE];
 STATIC CHAR8 FullProduct[MAX_RSP_SIZE];
 STATIC CHAR8 StrVariant[MAX_RSP_SIZE];
@@ -4449,8 +4454,12 @@ CmdOemBootEfiBlockIo (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
  * FastbootLib to reappear, then send `fastboot oem escape`. CmdRebootRecovery
  * uses a recovery reset reason instead of BCB, so the reason is preserved for
  * stock ABL while GBL itself avoids persistent BCB state. */
-STATIC VOID
-CmdOemEscape (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+
+/* Shared escape sequence used by `fastboot oem escape` and by the
+ * fastboot menu's deferred Escape dispatch in FastbootMain. Runs at
+ * TPL_APPLICATION in both call sites — see FastbootMain.c main loop. */
+EFI_STATUS
+GblFastbootEscapeToBootFlow (VOID)
 {
   EFI_STATUS Status;
 
@@ -4466,6 +4475,13 @@ CmdOemEscape (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
   DEBUG ((EFI_D_ERROR,
           "oem escape: BootFlowChainLoad returned %r\n",
           Status));
+  return Status;
+}
+
+STATIC VOID
+CmdOemEscape (IN CONST CHAR8 *Arg, IN VOID *Data, IN UINT32 Size)
+{
+  (VOID)GblFastbootEscapeToBootFlow ();
 }
 
 /*

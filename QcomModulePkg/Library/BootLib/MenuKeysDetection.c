@@ -82,6 +82,7 @@
 #include <Library/BootESP.h>
 
 extern EFI_STATUS GblFastbootEnableOemUnlockAllowed (VOID);
+extern BOOLEAN GblFastbootEscapePending;
 #include <Uefi.h>
 
 #if defined (AUTO_DEBUG_MODE) || defined (MODE_DEBUG) || defined (MODE_TEMPLATE) || defined (FAKELOCKED) || defined (FAKELOCKED_DEBUG)
@@ -218,12 +219,13 @@ UpdateDeviceStatus (OPTION_MENU_INFO *MsgInfo, INTN Reason)
     break;
   case ESCAPE:
     {
-      extern EFI_STATUS EFIAPI BootFlowChainLoad (VOID);
+      /* Do NOT call BootFlowChainLoad from this timer-notify; we run at
+       * TPL_CALLBACK and the chainload path is not safe at that TPL.
+       * Defer to the fastboot main loop, which runs at TPL_APPLICATION.
+       * See FastbootMain.c main loop and GblFastbootEscapeToBootFlow. */
       ExitMenuKeysDetection ();
-      BootFlowChainLoad ();
-      DisplayFastbootMenu ();
-      DEBUG ((EFI_D_WARN, "Escape chainload returned, back to fastboot menu\n"));
-      break;
+      GblFastbootEscapePending = TRUE;
+      return;  /* return from UpdateDeviceStatus; main loop will pick this up */
     }
   case OEMUNLOCKENABLE:
     Status = GblFastbootEnableOemUnlockAllowed ();
