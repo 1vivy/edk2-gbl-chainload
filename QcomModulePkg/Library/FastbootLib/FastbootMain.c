@@ -99,6 +99,8 @@ found at
 
 extern BOOLEAN GblFastbootEscapePending;
 extern EFI_STATUS GblFastbootEscapeToBootFlow (VOID);
+extern BOOLEAN GblFastbootEspBootPending;
+extern EFI_STATUS GblFastbootEspBootDeferred (VOID);
 
 #define USB_BUFF_SIZE USB_BUFFER_SIZE
 
@@ -427,6 +429,13 @@ EFI_STATUS FastbootInitialize (VOID)
       (VOID)GblFastbootEscapeToBootFlow ();
       /* On success BootFlowChainLoad does not return; on failure fall
        * through and let the next iteration handle the host. */
+    }
+
+    if (GblFastbootEspBootPending) {
+      GblFastbootEspBootPending = FALSE;
+      (VOID)GblFastbootEspBootDeferred ();
+      /* On success BootESP does not return; on failure, fall through and
+       * the next loop iteration handles whatever the host sends. */
     }
 
     if (FastbootFatal ()) {

@@ -168,6 +168,11 @@ STATIC BOOLEAN Finished = FALSE;
  * inside a timer notify and cannot safely call BootFlowChainLoad).
  * Drained by the fastboot main loop (FastbootMain.c) at TPL_APPLICATION. */
 BOOLEAN GblFastbootEscapePending = FALSE;
+
+/* Set TRUE by the menu ESP boot key handler (same TPL_CALLBACK problem
+ * as escape — BootESP loads + starts an EFI image, unsafe at this TPL).
+ * Drained by the fastboot main loop (FastbootMain.c) at TPL_APPLICATION. */
+BOOLEAN GblFastbootEspBootPending = FALSE;
 STATIC CHAR8 StrSerialNum[MAX_RSP_SIZE];
 STATIC CHAR8 FullProduct[MAX_RSP_SIZE];
 STATIC CHAR8 StrVariant[MAX_RSP_SIZE];
