@@ -4794,6 +4794,82 @@ GblVbmetaGetActiveSlot (OUT CHAR8 *Out, IN UINTN OutCap)
     AsciiStrnCpyS (Out, OutCap, SlotAsc, OutCap - 1);
 }
 
+/*
+ * GblVbmetaProbeChainPartition — reproduce diag's broken-chain verdict on a
+ * single chained partition. The top-level vbmeta only proves a chain
+ * descriptor *exists*; it says nothing about whether the chained partition's
+ * own embedded vbmeta is present and signed by the OEM chain key. This opens
+ * the partition (active slot), reads its 64-byte AvbFooter from the tail,
+ * follows it to the embedded vbmeta blob, and compares that blob's public key
+ * to the chain descriptor's key — the same key-identity check vbmeta-graft's
+ * `list-hash` does on the host (no whole-image hashing, no crypto).
+ *
+ * Returns GblAvbChainNoVbmeta for any read/lookup failure (the conservative
+ * "init would see ok_not_signed" bucket).
+ */
+STATIC GBL_AVB_CHAIN_VERDICT
+GblVbmetaProbeChainPartition (
+  IN CONST CHAR8  *PartName,
+  IN CONST UINT8  *ChainPk,
+  IN UINT32        ChainPkLen
+  )
+{
+  EFI_STATUS              Status;
+  EFI_BLOCK_IO_PROTOCOL  *BlockIo = NULL;
+  EFI_HANDLE             *Handle  = NULL;
+  CHAR16                  ResolvedName[MAX_GPT_NAME_SIZE];
+  UINT64                  PartSize, BlockSize, LastLba;
+  UINT8                  *TailBuf = NULL;
+  GBL_AVB_FOOTER          Footer;
+  GBL_AVB_CHAIN_VERDICT   Verdict = GblAvbChainNoVbmeta;
+  UINT64                  StartLba, IntraOff, SpanBytes, ReadBytes;
+  UINT8                  *VbBuf;
+
+  Status = LocateActiveSlotPartition (PartName, &BlockIo, &Handle,
+                                      ResolvedName, ARRAY_SIZE (ResolvedName));
+  if (EFI_ERROR (Status) || BlockIo == NULL)
+    return GblAvbChainNoVbmeta;
+
+  PartSize  = GetPartitionSize (BlockIo);
+  BlockSize = BlockIo->Media->BlockSize;
+  if (PartSize < GBL_AVB_FOOTER_SIZE || BlockSize == 0)
+    return GblAvbChainNoVbmeta;
+
+  /* The AvbFooter occupies the last 64 bytes of the partition, i.e. the tail
+     of its final block. Read just that block. */
+  TailBuf = AllocatePool (BlockSize);
+  if (TailBuf == NULL)
+    return GblAvbChainNoVbmeta;
+  LastLba = (PartSize / BlockSize) - 1;
+  Status = BlockIo->ReadBlocks (BlockIo, BlockIo->Media->MediaId,
+                                LastLba, BlockSize, TailBuf);
+  if (EFI_ERROR (Status)) {
+    FreePool (TailBuf);
+    return GblAvbChainNoVbmeta;
+  }
+  Status = AvbParse_FooterFromTail (TailBuf, BlockSize, PartSize, &Footer);
+  FreePool (TailBuf);
+  if (EFI_ERROR (Status))
+    return GblAvbChainNoVbmeta;  /* no footer → init's ok_not_signed bucket */
+
+  /* Read the embedded vbmeta blob the footer points at, block-aligned. */
+  StartLba  = Footer.VbmetaOffset / BlockSize;
+  IntraOff  = Footer.VbmetaOffset - (StartLba * BlockSize);
+  SpanBytes = IntraOff + Footer.VbmetaSize;
+  ReadBytes = ((SpanBytes + BlockSize - 1) / BlockSize) * BlockSize;
+  VbBuf = AllocatePool (ReadBytes);
+  if (VbBuf == NULL)
+    return GblAvbChainNoVbmeta;
+  Status = BlockIo->ReadBlocks (BlockIo, BlockIo->Media->MediaId,
+                                StartLba, ReadBytes, VbBuf);
+  if (!EFI_ERROR (Status)) {
+    AvbParse_ChainVerdict (VbBuf + IntraOff, Footer.VbmetaSize,
+                           ChainPk, ChainPkLen, &Verdict);
+  }
+  FreePool (VbBuf);
+  return Verdict;
+}
+
 STATIC VOID
 GblVbmetaSetPartStatus (
   IN OUT GBL_VBMETA_PART_VAR *Part,
@@ -4820,12 +4896,29 @@ GblVbmetaSetPartStatus (
 
   switch (Type) {
   case GblPartDescHash:
+    /* Hash-descriptor partitions: a digest mismatch here would require
+       re-hashing the whole (multi-MiB) image, which we deliberately avoid in
+       menu setup — and every installed mode tolerates a hash mismatch anyway
+       (diag excludes them from its verdict too). Report descriptor presence. */
     AsciiStrnCpyS (Part->DescType, sizeof (Part->DescType), "hash", sizeof (Part->DescType) - 1);
     AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "ok", sizeof (Part->Status) - 1);
     break;
   case GblPartDescChain:
+    /* Chain-descriptor partitions: descend into the chained partition and
+       reproduce diag's key-identity verdict (ok / key_mismatch / no_vbmeta). */
     AsciiStrnCpyS (Part->DescType, sizeof (Part->DescType), "chain", sizeof (Part->DescType) - 1);
-    AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "ok", sizeof (Part->Status) - 1);
+    switch (GblVbmetaProbeChainPartition (Part->Name, PubKey, PubKeyLen)) {
+    case GblAvbChainOk:
+      AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "ok", sizeof (Part->Status) - 1);
+      break;
+    case GblAvbChainKeyMismatch:
+      AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "key_mismatch", sizeof (Part->Status) - 1);
+      break;
+    case GblAvbChainNoVbmeta:
+    default:
+      AsciiStrnCpyS (Part->Status, sizeof (Part->Status), "no_vbmeta", sizeof (Part->Status) - 1);
+      break;
+    }
     break;
   default:
     AsciiStrnCpyS (Part->DescType, sizeof (Part->DescType), "none", sizeof (Part->DescType) - 1);
@@ -4843,24 +4936,45 @@ GblVbmetaBuildWarning (VOID)
 
   AsciiStrnCpyS (mVbmetaWarning, sizeof (mVbmetaWarning), "none", sizeof (mVbmetaWarning) - 1);
   for (Idx = 0; Idx < ARRAY_SIZE (mVbmetaPartVars); Idx++) {
-    if (AsciiStrCmp (mVbmetaPartVars[Idx].Name, "boot") != 0 &&
-        AsciiStrCmp (mVbmetaPartVars[Idx].Name, "init_boot") != 0 &&
-        AsciiStrCmp (mVbmetaPartVars[Idx].Name, "vendor_boot") != 0 &&
-        AsciiStrCmp (mVbmetaPartVars[Idx].Name, "recovery") != 0)
+    CONST CHAR8 *Name   = mVbmetaPartVars[Idx].Name;
+    CONST CHAR8 *PStatus = mVbmetaPartVars[Idx].Status;
+    BOOLEAN      Bad;
+
+    /* Diag's broken-chain set: the AOSP first-stage init boot-blocker
+       partitions (everything except the OEM-signed vbmeta_* sub-chains). */
+    if (AsciiStrCmp (Name, "boot") != 0 &&
+        AsciiStrCmp (Name, "init_boot") != 0 &&
+        AsciiStrCmp (Name, "vendor_boot") != 0 &&
+        AsciiStrCmp (Name, "recovery") != 0 &&
+        AsciiStrCmp (Name, "dtbo") != 0)
       continue;
-    if (AsciiStrCmp (mVbmetaPartVars[Idx].Status, "unsigned") != 0)
+
+    /* Bad = the partition would fail verified-boot under a locked-presenting
+       (mode-1) init: no descriptor at all (unsigned), or a chained partition
+       whose embedded vbmeta is absent (no_vbmeta) or signed by the wrong key
+       (key_mismatch). Mirrors vbmeta-graft's no_vbmeta|key_mismatch bucket. */
+    Bad = (AsciiStrCmp (PStatus, "unsigned")     == 0) ||
+          (AsciiStrCmp (PStatus, "no_vbmeta")    == 0) ||
+          (AsciiStrCmp (PStatus, "key_mismatch") == 0);
+    if (!Bad)
       continue;
 
     if (First) {
       AsciiStrnCpyS (mVbmetaWarning, sizeof (mVbmetaWarning),
-                     "unsigned:", sizeof (mVbmetaWarning) - 1);
+                     "verify-fail:", sizeof (mVbmetaWarning) - 1);
       First = FALSE;
     } else {
       AsciiStrnCatS (mVbmetaWarning, sizeof (mVbmetaWarning), ",", AsciiStrLen (","));
     }
     AsciiStrnCatS (mVbmetaWarning, sizeof (mVbmetaWarning),
-                   mVbmetaPartVars[Idx].Name,
-                   AsciiStrLen (mVbmetaPartVars[Idx].Name));
+                   Name, AsciiStrLen (Name));
+  }
+  /* If anything failed, tell the operator the remedy (a vbmeta graft restores
+     the OEM-signed chain). Only mode-1 reaches here, which is the only mode
+     whose locked-presenting init actually re-verifies the chain. */
+  if (!First) {
+    AsciiStrnCatS (mVbmetaWarning, sizeof (mVbmetaWarning),
+                   " - graft required", AsciiStrLen (" - graft required"));
   }
 #else
   AsciiStrnCpyS (mVbmetaWarning, sizeof (mVbmetaWarning), "none", sizeof (mVbmetaWarning) - 1);
