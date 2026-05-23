@@ -83,26 +83,21 @@ STATIC OPTION_MENU_INFO gMenuInfo;
 
 extern EFI_STATUS GblFastbootReadOemUnlockAllowed (OUT UINT32 *Allowed);
 extern VOID GblFastbootGetAvbWarning (OUT CHAR8 *Out, IN UINTN OutCap);
-#if (GBL_MODE == 2)
+/* Formerly gated on `#if (GBL_MODE == 2)`. Task 11 collapsed the per-mode
+   flag; the setter is unconditionally compiled and the runtime manifest
+   decides whether it ever holds a non-empty string. */
 extern VOID GblFastbootGetMode2Warning (OUT CHAR8 *Out, IN UINTN OutCap);
-#endif
 
 #if defined (AUTO_DEBUG_MODE) || defined (MODE_DEBUG) || defined (MODE_TEMPLATE) || defined (FAKELOCKED) || defined (FAKELOCKED_DEBUG)
 #define GBL_EXPERIMENTAL_FASTBOOT_CMDS 1
 #endif
 
-#ifndef GBL_MODE
-# define GBL_MODE 0
-#endif
-
-#if (GBL_MODE == 0)
-# define GBL_CHAINLOAD_MODE  "mode-0"
-#elif (GBL_MODE == 1)
-# define GBL_CHAINLOAD_MODE  "mode-1"
-#elif (GBL_MODE == 2)
-# define GBL_CHAINLOAD_MODE  "mode-2"
-#else
-# define GBL_CHAINLOAD_MODE  "unknown-mode"
+/* Task 11 (engine rework): no per-mode build. The on-screen identity is the
+   GBL_BUILD_NAME string (set by build-inside-docker.sh — defaults to
+   "gbl-chainload" with optional -auto/-debug/-verbose suffixes). The
+   getvar gbl-chainload_build mirrors this string. */
+#ifndef GBL_BUILD_NAME
+# define GBL_BUILD_NAME  "gbl-chainload"
 #endif
 
 #ifndef GBL_AUTO
@@ -278,7 +273,7 @@ STATIC MENU_MSG_INFO mFastbootCommonMsgInfo[] = {
      COMMON,
      0,
      NOACTION},
-    {{"MODE - " GBL_CHAINLOAD_MODE},
+    {{"BUILD - " GBL_BUILD_NAME},
      COMMON_FACTOR,
      BGR_GREEN,
      BGR_BLACK,
@@ -325,9 +320,12 @@ STATIC MENU_MSG_INFO mFastbootAvbWarnMsgInfo[] = {
      NOACTION},
 };
 
-#if (GBL_MODE == 2)
+/* Profile-spoof warning surface (formerly mode-2). Task 11 compiles this
+   unconditionally; the BootFlow runtime path only populates the backing
+   string when gManifest.WantProfileSpoof is set, so the draw block below
+   is a no-op when the manifest didn't ask for it. */
 STATIC MENU_MSG_INFO mFastbootMode2WarnMsgInfo[] = {
-    {{"MODE-2 - "},
+    {{"PROFILE - "},
      COMMON_FACTOR,
      BGR_RED,
      BGR_BLACK,
@@ -335,7 +333,6 @@ STATIC MENU_MSG_INFO mFastbootMode2WarnMsgInfo[] = {
      0,
      NOACTION},
 };
-#endif
 
 STATIC EFI_STATUS CleanMessage (UINT32 MessageLen, UINT32 Location)
 {
@@ -386,9 +383,7 @@ UpdateFastbootOptionItem (UINT32 OptionItem, UINT32 *pLocation)
   UINT32 CommonMsgLen = AsciiStrLen (mFastbootCommonWarnMsgInfo[0].Msg);
   UINT32 MaxLineLen = 0;
   CHAR8 AvbWarning[MAX_MSG_SIZE] = "";
-#if (GBL_MODE == 2)
   CHAR8 Mode2Warning[MAX_MSG_SIZE] = "";
-#endif
 
   FastbootLineInfo = AllocateZeroPool (sizeof (MENU_MSG_INFO));
   if (FastbootLineInfo == NULL) {
@@ -468,13 +463,15 @@ UpdateFastbootOptionItem (UINT32 OptionItem, UINT32 *pLocation)
 #endif
     Location += LineHeight;
 
-#if (GBL_MODE == 2)
+  /* Profile-spoof warning surface (formerly mode-2). Compiled
+     unconditionally — Mode2Warning is empty unless BootFlow's runtime
+     manifest gate populated it via GblFastbootSetMode2Warning. */
   GblFastbootGetMode2Warning (Mode2Warning, sizeof (Mode2Warning));
   if (Mode2Warning[0] != '\0') {
     Location += LineHeight;
     AsciiStrnCpyS (mFastbootMode2WarnMsgInfo[0].Msg,
                    sizeof (mFastbootMode2WarnMsgInfo[0].Msg),
-                   "MODE-2 - ", AsciiStrLen ("MODE-2 - "));
+                   "PROFILE - ", AsciiStrLen ("PROFILE - "));
     AsciiStrnCatS (mFastbootMode2WarnMsgInfo[0].Msg,
                    sizeof (mFastbootMode2WarnMsgInfo[0].Msg),
                    Mode2Warning, AsciiStrLen (Mode2Warning));
@@ -485,7 +482,6 @@ UpdateFastbootOptionItem (UINT32 OptionItem, UINT32 *pLocation)
     Location += Height;
     Location += LineHeight;
   }
-#endif
 
 Exit:
   FreePool (FastbootLineInfo);

@@ -4930,7 +4930,13 @@ GblVbmetaSetPartStatus (
 STATIC VOID
 GblVbmetaBuildWarning (VOID)
 {
-#if defined (GBL_MODE) && (GBL_MODE == 1)
+  /* Originally gated on `#if (GBL_MODE == 1)` — only a locked-presenting
+     init actually re-verifies the chain, so the warning was suppressed in
+     non-fakelock builds. Task 11 (engine rework) collapses GBL_MODE; the
+     warning is now computed unconditionally as a useful diagnostic. The
+     FastbootMenu reader filters by "none" before drawing it, and operator
+     attention to a broken AVB chain is appropriate regardless of the
+     manifest-selected runtime behavior. */
   UINTN Idx;
   BOOLEAN First = TRUE;
 
@@ -4950,8 +4956,8 @@ GblVbmetaBuildWarning (VOID)
       continue;
 
     /* Bad = the partition would fail verified-boot under a locked-presenting
-       (mode-1) init: no descriptor at all (unsigned), or a chained partition
-       whose embedded vbmeta is absent (no_vbmeta) or signed by the wrong key
+       init: no descriptor at all (unsigned), or a chained partition whose
+       embedded vbmeta is absent (no_vbmeta) or signed by the wrong key
        (key_mismatch). Mirrors vbmeta-graft's no_vbmeta|key_mismatch bucket. */
     Bad = (AsciiStrCmp (PStatus, "unsigned")     == 0) ||
           (AsciiStrCmp (PStatus, "no_vbmeta")    == 0) ||
@@ -4970,15 +4976,11 @@ GblVbmetaBuildWarning (VOID)
                    Name, AsciiStrLen (Name));
   }
   /* If anything failed, tell the operator the remedy (a vbmeta graft restores
-     the OEM-signed chain). Only mode-1 reaches here, which is the only mode
-     whose locked-presenting init actually re-verifies the chain. */
+     the OEM-signed chain). */
   if (!First) {
     AsciiStrnCatS (mVbmetaWarning, sizeof (mVbmetaWarning),
                    " - graft required", AsciiStrLen (" - graft required"));
   }
-#else
-  AsciiStrnCpyS (mVbmetaWarning, sizeof (mVbmetaWarning), "none", sizeof (mVbmetaWarning) - 1);
-#endif
 }
 
 STATIC VOID
@@ -5039,12 +5041,12 @@ GblFastbootGetAvbWarning (OUT CHAR8 *Out, IN UINTN OutCap)
 
 #endif /* GBL_EXPERIMENTAL_FASTBOOT_CMDS */
 
-/* Mode-2 warning surface. Originally gated on `#if (GBL_MODE == 2)`;
-   compiled unconditionally so BootFlow.c can call the setter under the
-   runtime gManifest.WantProfileSpoof gate without a separate stub. The
-   FastbootMenu reader and the BootFlow caller are themselves gated, so
-   in non-mode-2 builds these symbols sit unreferenced and the static
-   buffer is dead-stripped or simply unused. */
+/* Profile-spoof warning surface (formerly "mode-2"). Originally gated on
+   `#if (GBL_MODE == 2)`; compiled unconditionally so BootFlow.c can call
+   the setter under the runtime gManifest.WantProfileSpoof gate without a
+   separate stub. After Task 11 the per-mode flag is gone entirely; the
+   FastbootMenu reader and BootFlow caller decide visibility from the
+   manifest, and the static buffer is dead-stripped if unused. */
 
 STATIC CHAR8 mMode2Warning[MAX_RSP_SIZE] = "";
 
@@ -5175,20 +5177,18 @@ FastbootCommandSetup (IN VOID *Base, IN UINT64 Size)
   FastbootPublishVar ("secure", IsSecureBootEnabled () ? "yes" : "no");
 
   /* gbl-chainload getvars: expose build identity for scripts and diagnostics.
-     scripts/test-device-automatic.sh uses gbl-chainload_mode to confirm we
-     landed in our FastbootLib (not stock) and identify the mode. */
-#ifdef GBL_MODE
-#if (GBL_MODE == 0)
-  FastbootPublishVar ("gbl-chainload_mode", "mode-0");
-#elif (GBL_MODE == 1)
-  FastbootPublishVar ("gbl-chainload_mode", "mode-1");
-#elif (GBL_MODE == 2)
-  FastbootPublishVar ("gbl-chainload_mode", "mode-2");
+     scripts/test-device-automatic.sh / scripts/device-monitor.sh use
+     gbl-chainload_build to confirm we landed in our FastbootLib (not stock)
+     and identify the build flavor (debug/verbose/auto suffix).
+
+     Task 11 collapsed GBL_MODE — there is no per-mode build any more.
+     Activation of fakelock / profile-spoof is decided at runtime from the
+     GBLP1 manifest baked into the EFISP overlay, not from a compile-time
+     mode. The build flavor name (GBL_BUILD_NAME) is the canonical identity. */
+#ifdef GBL_BUILD_NAME
+  FastbootPublishVar ("gbl-chainload_build", GBL_BUILD_NAME);
 #else
-  FastbootPublishVar ("gbl-chainload_mode", "unknown");
-#endif
-#else
-  FastbootPublishVar ("gbl-chainload_mode", "undef");
+  FastbootPublishVar ("gbl-chainload_build", "gbl-chainload");
 #endif
   FastbootPublishVar ("gbl-chainload_date", __DATE__ " " __TIME__);
   FastbootPublishVar ("gbl-chainload_version", GBL_CHAINLOAD_VERSION);
