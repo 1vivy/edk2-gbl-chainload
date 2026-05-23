@@ -5039,7 +5039,12 @@ GblFastbootGetAvbWarning (OUT CHAR8 *Out, IN UINTN OutCap)
 
 #endif /* GBL_EXPERIMENTAL_FASTBOOT_CMDS */
 
-#if (GBL_MODE == 2)
+/* Mode-2 warning surface. Originally gated on `#if (GBL_MODE == 2)`;
+   compiled unconditionally so BootFlow.c can call the setter under the
+   runtime gManifest.WantProfileSpoof gate without a separate stub. The
+   FastbootMenu reader and the BootFlow caller are themselves gated, so
+   in non-mode-2 builds these symbols sit unreferenced and the static
+   buffer is dead-stripped or simply unused. */
 
 STATIC CHAR8 mMode2Warning[MAX_RSP_SIZE] = "";
 
@@ -5062,8 +5067,6 @@ GblFastbootGetMode2Warning (OUT CHAR8 *Out, IN UINTN OutCap)
   }
   AsciiStrnCpyS (Out, OutCap, mMode2Warning, OutCap - 1);
 }
-
-#endif /* GBL_MODE == 2 */
 
 /* Registers all Stock commands, Publishes all stock variables
  * and partitiion sizes. base and size are the respective parameters
